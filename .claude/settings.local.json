@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(flutter config:*)",
+      "Bash(flutter:*)",
+      "Bash(C:flutterbinflutter --version)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
