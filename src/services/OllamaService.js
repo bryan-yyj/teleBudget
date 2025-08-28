@@ -20,7 +20,7 @@ class OllamaService {
       {
         "amount": "numeric amount (e.g., 12.50)",
         "currency": "currency code (e.g., SGD)",
-        "description": "brief description of the transaction",
+        "description": "brief description ONLY if clearly identifiable (null if unclear)",
         "merchant": "recipient/merchant/store name",
         "date": "transaction date in ISO format",
         "category": "category from: Food & Dining, Transportation, Shopping, Entertainment, Bills & Utilities, Healthcare, Education, Others",
@@ -42,9 +42,10 @@ class OllamaService {
          - Bills/utilities → "Bills & Utilities"
 
       3. DESCRIPTION GUIDELINES:
-         - For transfers: "Transfer to [recipient name]" or "Payment to [recipient]"
-         - For purchases: "[Item/service] at [merchant]"
-         - Be specific about what the transaction actually represents
+         - ONLY provide description if clearly identifiable from the image
+         - For transfers: "Transfer to [recipient name]" or "Payment to [recipient]" (only if recipient visible)
+         - For purchases: "[Item/service] at [merchant]" (only if specific items visible)
+         - If unclear or generic receipt, set description to null
 
       4. MERCHANT/RECIPIENT:
          - For transfers: Use the recipient's name if visible
@@ -111,15 +112,15 @@ class OllamaService {
       }
 
       // Validate required fields
-      if (!parsedResult.amount || !parsedResult.description) {
-        throw new Error('AI response missing required fields (amount, description)');
+      if (!parsedResult.amount) {
+        throw new Error('AI response missing required field: amount');
       }
 
       // Normalize and validate the result
       const result = {
         amount: this.parseAmount(parsedResult.amount),
         currency: parsedResult.currency || 'SGD',
-        description: parsedResult.description || 'Receipt transaction',
+        description: parsedResult.description || null,
         merchant: parsedResult.merchant || 'Unknown',
         date: this.parseDate(parsedResult.date),
         category: this.validateCategory(parsedResult.category),
@@ -303,12 +304,21 @@ class OllamaService {
 
       // Try to parse JSON from the response
       try {
-        const cleanedResponse = aiResponse
+        let cleanedResponse = aiResponse
           .replace(/```json\s*/g, '')
           .replace(/```\s*/g, '')
           .replace(/^\s*[\r\n]/gm, '')
           .trim();
+        
+        // Fix common JSON escaping issues from AI models
+        cleanedResponse = cleanedResponse
+          .replace(/\\_/g, '_')           // Fix escaped underscores
+          .replace(/\\\//g, '/')          // Fix escaped slashes
+          .replace(/\\"/g, '"')           // Fix escaped quotes
+          .replace(/\\n/g, '\n')          // Fix escaped newlines
+          .replace(/\\t/g, '\t');         // Fix escaped tabs
 
+        console.log('Cleaned JSON before parsing:', cleanedResponse);
         return JSON.parse(cleanedResponse);
       } catch (parseError) {
         console.error('Failed to parse JSON response:', parseError);
@@ -316,7 +326,15 @@ class OllamaService {
         const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
         if (jsonMatch) {
           try {
-            return JSON.parse(jsonMatch[0]);
+            let cleanedJson = jsonMatch[0];
+            // Apply same cleaning to retry attempt
+            cleanedJson = cleanedJson
+              .replace(/\\_/g, '_')           // Fix escaped underscores
+              .replace(/\\\//g, '/')          // Fix escaped slashes
+              .replace(/\\"/g, '"')           // Fix escaped quotes
+              .replace(/\\n/g, '\n')          // Fix escaped newlines
+              .replace(/\\t/g, '\t');         // Fix escaped tabs
+            return JSON.parse(cleanedJson);
           } catch (retryError) {
             throw new Error('Unable to parse AI response as JSON');
           }

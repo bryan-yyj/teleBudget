@@ -14,6 +14,7 @@ class TelegramBotService {
   constructor() {
     this.bot = null;
     this.webhookUrl = process.env.TELEGRAM_WEBHOOK_URL;
+    this.botToken = process.env.TELEGRAM_BOT_TOKEN;
     this.processingQueue = null;
     
     // Session management for multi-step conversations
@@ -217,7 +218,14 @@ class TelegramBotService {
     const chatId = message.chat.id;
     
     try {
-      await this.bot.sendMessage(chatId, '📸 Processing your receipt... This may take a moment.');
+      // Get user-provided description from caption
+      const userDescription = this.formatDescription(message.caption);
+      
+      if (userDescription) {
+        await this.bot.sendMessage(chatId, `📸 Processing your receipt for "${userDescription}"... This may take a moment.`);
+      } else {
+        await this.bot.sendMessage(chatId, '📸 Processing your receipt... This may take a moment.');
+      }
       
       // Get the highest resolution photo
       const photo = message.photo[message.photo.length - 1];
@@ -254,7 +262,8 @@ class TelegramBotService {
           transactionId: transaction.id,
           userId: user.id,
           chatId: chatId,
-          imagePath: imagePath
+          imagePath: imagePath,
+          userDescription: userDescription // Pass user's description
         });
       } else {
         console.error('ProcessingQueue not available - receipt will not be processed');
@@ -442,13 +451,39 @@ class TelegramBotService {
     };
   }
 
+  formatDescription(description) {
+    if (!description || description.trim() === '') {
+      return null; // Return null for empty descriptions so AI can generate one
+    }
+
+    // Clean and format the description
+    let formatted = description.trim();
+    
+    // Remove extra spaces
+    formatted = formatted.replace(/\s+/g, ' ');
+    
+    // Capitalize first letter of each word for better readability
+    formatted = formatted.split(' ')
+      .map(word => {
+        // Keep common abbreviations uppercase
+        if (['MRT', 'LRT', 'ATM', 'GPS', 'SMS', 'API', 'URL', 'ID'].includes(word.toUpperCase())) {
+          return word.toUpperCase();
+        }
+        // Capitalize first letter, keep rest as is for names like McDonald's
+        return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+      })
+      .join(' ');
+    
+    return formatted;
+  }
+
   async sendWelcomeMessage(chatId) {
     const message = `
 🎯 Welcome to TeleBudget!
 
 Your AI-powered budget tracking assistant. I can help you:
 
-📸 Process receipt photos automatically using AI
+📸 Process receipt photos automatically using AI (add captions for custom descriptions!)
 💰 Record manual transactions
 📊 View spending statistics
 🏷️ Categorize your expenses automatically
@@ -478,6 +513,8 @@ Type /help for more commands!
 
 **How to use:**
 📸 **Receipt scanning:** Send me a photo of your receipt or payment confirmation
+   • Add a caption to describe the transaction (e.g., "Grab To School")
+   • I'll format your description nicely and use it instead of AI guessing!
 💬 **Interactive entry:** Use /add for step-by-step transaction entry with:
    • Smart payment method suggestions based on your habits
    • AI-powered categorization and merchant detection
@@ -681,15 +718,20 @@ ${confidence < 0.8 ? 'You can review and edit this transaction in the mobile app
 
     await this.bot.sendMessage(chatId, 
       `✅ Amount: SGD ${amount.toFixed(2)}\n\n` +
-      '📝 Now, what was this transaction for? (e.g., coffee, lunch, grab ride):'
+      '📝 What was this transaction for? (optional)\n' +
+      'Examples: "Grab To School", "Coffee At Starbucks", "Lunch"\n\n' +
+      'Or just send any text - I\'ll format it nicely! 😊'
     );
   }
 
   async handleDescriptionInput(chatId, text, session, user) {
-    session.data.description = text;
+    // Format the description nicely, or use null if empty
+    const formattedDescription = this.formatDescription(text);
+    session.data.description = formattedDescription;
 
-    // Use AI to enhance and categorize
-    const enhancedData = await this.enhanceManualTransaction(text, session.data.amount);
+    // Use AI to enhance and categorize (use formatted description or fallback)
+    const descriptionForAI = formattedDescription || 'Manual transaction';
+    const enhancedData = await this.enhanceManualTransaction(descriptionForAI, session.data.amount);
     session.data.enhancedData = enhancedData;
 
     // Get user's payment method preferences
@@ -840,11 +882,114 @@ ${confidence < 0.8 ? 'You can review and edit this transaction in the mobile app
         } else {
           await this.completeTransaction(chatId, session, paymentMethod);
         }
+      } else if (data.startsWith('receipt_')) {
+        // Handle receipt confirmation buttons
+        await this.handleReceiptCallback(callbackQuery, data, session);
       }
     } catch (error) {
       console.error('Error handling callback query:', error);
       await this.bot.sendMessage(chatId, '❌ Something went wrong. Please try again.');
     }
+  }
+
+  async handleReceiptCallback(callbackQuery, data, session) {
+    const chatId = callbackQuery.message.chat.id;
+    const userId = callbackQuery.from.id;
+
+    if (!session || session.type !== 'receipt_confirmation') {
+      await this.bot.sendMessage(chatId, '❌ Session expired. Please send your receipt again.');
+      return;
+    }
+
+    const { aiResult, receiptId } = session;
+
+    switch (data) {
+      case 'receipt_confirm':
+        // User confirmed the AI extracted details - now ask for payment method
+        await this.askForPaymentMethod(chatId, callbackQuery.message.message_id, aiResult, userId);
+        
+        // Update session to payment selection
+        session.step = 'payment_selection';
+        session.data = {
+          amount: aiResult.amount,
+          description: aiResult.description,
+          enhancedData: aiResult
+        };
+        break;
+
+      case 'receipt_edit':
+        // User wants to edit - start manual entry flow
+        await this.bot.editMessageText(
+          '✏️ Let\'s edit the transaction details. Please enter the correct amount:',
+          {
+            chat_id: chatId,
+            message_id: callbackQuery.message.message_id
+          }
+        );
+        
+        // Switch to manual entry mode
+        session.type = 'manual_entry';
+        session.step = 'amount';
+        session.data = { receiptId: receiptId };
+        break;
+
+      case 'receipt_cancel':
+        // User cancelled - delete everything
+        await Receipt.delete(receiptId);
+        this.userSessions.delete(chatId);
+        
+        await this.bot.editMessageText(
+          '❌ Receipt processing cancelled.',
+          {
+            chat_id: chatId,
+            message_id: callbackQuery.message.message_id
+          }
+        );
+        break;
+    }
+  }
+
+  async askForPaymentMethod(chatId, messageId, aiResult, userId = null) {
+    // If userId is provided, use it; otherwise try to get it from chatId (fallback)
+    const telegramId = userId ? userId.toString() : chatId.toString();
+    const user = await User.findByTelegramId(telegramId);
+    
+    if (!user) {
+      console.error(`User not found for telegramId: ${telegramId}`);
+      await this.bot.sendMessage(chatId, '❌ User not found. Please try sending /start first.');
+      return;
+    }
+    
+    const suggestions = await this.getPaymentMethodSuggestions(user.id, aiResult.category);
+    
+    const keyboard = {
+      inline_keyboard: []
+    };
+
+    // Add suggested payment methods
+    suggestions.forEach(method => {
+      keyboard.inline_keyboard.push([{
+        text: `💳 ${method}`,
+        callback_data: `payment:${method}`
+      }]);
+    });
+
+    // Add "Other" option
+    keyboard.inline_keyboard.push([{
+      text: '➕ Other',
+      callback_data: 'payment:other'
+    }]);
+
+    const message = `✅ Details confirmed! Now select your payment method:\n\n` +
+      `💰 Amount: $${aiResult.amount}\n` +
+      `📝 ${aiResult.description}\n\n` +
+      `Choose your payment method:`;
+
+    await this.bot.editMessageText(message, {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: keyboard
+    });
   }
 
   async completeTransaction(chatId, session, paymentMethod) {

@@ -1,5 +1,6 @@
 const Database = require('../database/Database');
 const OllamaService = require('./OllamaService');
+const ReceiptProcessor = require('./ReceiptProcessor');
 const TelegramBot = require('./TelegramBot');
 const Transaction = require('../models/Transaction');
 const Receipt = require('../models/Receipt');
@@ -11,10 +12,16 @@ class ProcessingQueue {
     this.maxConcurrent = 2;
     this.currentProcessing = 0;
     this.webSocketEmitter = null;
+    this.receiptProcessor = new ReceiptProcessor();
+    this.telegramBot = null;
   }
 
   setWebSocketEmitter(emitter) {
     this.webSocketEmitter = emitter;
+  }
+
+  setTelegramBot(telegramBot) {
+    this.telegramBot = telegramBot;
   }
 
   async initialize() {
@@ -34,7 +41,7 @@ class ProcessingQueue {
         `INSERT INTO processing_queue (type, payload) VALUES (?, ?)`,
         [type, JSON.stringify(payload)]
       );
-      
+
       console.log(`Added ${type} job to queue:`, result.id);
       return result.id;
     } catch (error) {
@@ -73,7 +80,7 @@ class ProcessingQueue {
 
   async processJob(job) {
     this.currentProcessing++;
-    
+
     try {
       // Mark job as processing
       await Database.run(
@@ -109,7 +116,7 @@ class ProcessingQueue {
 
     } catch (error) {
       console.error(`❌ Error processing ${job.type} job:`, job.id, error);
-      
+
       // Mark job as failed or retry
       const newStatus = job.attempts >= job.max_attempts ? 'failed' : 'pending';
       await Database.run(
@@ -124,7 +131,7 @@ class ProcessingQueue {
   }
 
   async processReceiptJob(payload) {
-    const { receiptId, transactionId, userId, chatId, imagePath } = payload;
+    const { receiptId, transactionId, userId, chatId, imagePath, userDescription } = payload;
 
     try {
       // Update receipt status
@@ -135,21 +142,24 @@ class ProcessingQueue {
         this.webSocketEmitter.notifyReceiptProcessingStarted(userId, receiptId, transactionId);
       }
 
-      // Process with Ollama AI
-      const aiResult = await OllamaService.processReceipt(imagePath);
-      
-      if (!aiResult || aiResult.amount <= 0) {
-        // If AI processing failed, create a placeholder transaction for manual review
-        const updatedTransaction = await Transaction.update(transactionId, {
-          amount: 0.01, // Minimal amount to indicate manual review needed
-          description: aiResult?.description || 'Receipt processing failed - please review manually',
-          category: 'Others',
-          merchant: aiResult?.merchant || 'Unknown',
-          transactionDate: aiResult?.date || new Date().toISOString(),
-          confidenceScore: 0.1,
-          isVerified: 0
-        });
+      // Step 1: Process image with EasyOCR
+      console.log('🔍 Processing receipt with EasyOCR...');
+      const processedReceipt = await this.receiptProcessor.processReceiptImage(imagePath);
 
+      if (processedReceipt.error) {
+        throw new Error(`Receipt preprocessing failed: ${processedReceipt.error}`);
+      }
+
+      // Step 2: Create AI prompt from processed text
+      const aiPrompt = this.receiptProcessor.createAIPrompt(processedReceipt);
+
+      // Step 3: Process with Ollama AI using structured text instead of image
+      console.log('🤖 Processing structured text with Ollama...');
+      const aiResult = await OllamaService.processTextPrompt(aiPrompt);
+
+      if (!aiResult || !aiResult.amount || aiResult.amount <= 0) {
+        // If AI processing failed, notify user and delete the placeholder transaction
+        await Transaction.delete(transactionId);
         await Receipt.updateProcessingStatus(receiptId, 'failed', {
           confidence: 0.1,
           rawResponse: aiResult,
@@ -157,57 +167,83 @@ class ProcessingQueue {
         });
 
         // Notify user via Telegram about the failure
-        if (chatId) {
-          await TelegramBot.notifyTransactionProcessed(chatId, updatedTransaction, {
-            ai_confidence: 0.1,
-            processing_status: 'failed'
-          });
+        if (chatId && this.telegramBot && this.telegramBot.bot) {
+          await this.telegramBot.bot.sendMessage(chatId,
+            '❌ Sorry, I couldn\'t extract transaction details from your receipt. Please try:\n\n' +
+            '• Taking a clearer photo\n' +
+            '• Using /add to enter the transaction manually\n' +
+            '• Sending the receipt again'
+          );
         }
 
-        return { success: false, transaction: updatedTransaction, error: 'AI processing failed' };
+        return { success: false, error: 'AI processing failed' };
       }
 
-      // Update transaction with AI results
-      const updatedTransaction = await Transaction.update(transactionId, {
-        amount: parseFloat(aiResult.amount),
-        description: aiResult.description || 'AI processed receipt',
-        category: aiResult.category || 'Others',
-        merchant: aiResult.merchant || 'Unknown',
-        transaction_date: aiResult.date || new Date().toISOString(),
-        payment_method: aiResult.payment_method || null,
-        confidence_score: aiResult.confidence || 0.5,
-        is_verified: aiResult.confidence > 0.8 ? 1 : 0
-      });
+      // Delete the placeholder transaction - we'll create a new one through the confirmation flow
+      await Transaction.delete(transactionId);
 
-      // Update receipt with AI results
+      // Update receipt status to processed
       await Receipt.updateProcessingStatus(receiptId, 'processed', {
         confidence: aiResult.confidence,
         rawResponse: aiResult
       });
 
-      // Notify WebSocket clients that processing completed
-      if (this.webSocketEmitter) {
-        this.webSocketEmitter.notifyReceiptProcessingCompleted(userId, receiptId, updatedTransaction);
-        this.webSocketEmitter.notifyTransactionUpdated(userId, updatedTransaction);
+      // Send AI results to user for confirmation (same as manual transaction flow)
+      if (chatId && this.telegramBot && this.telegramBot.userSessions) {
+        // Create a session for this receipt processing (similar to manual /add)
+        // Use user description if provided, otherwise use AI description
+        const finalDescription = userDescription || aiResult.description || null;
+
+        const sessionData = {
+          type: 'receipt_confirmation',
+          receiptId: receiptId,
+          aiResult: { ...aiResult, description: finalDescription }, // Override with user description
+          step: 'confirm_details'
+        };
+
+        this.telegramBot.userSessions.set(chatId, sessionData);
+
+        // Send confirmation message with AI extracted details
+        const confirmationMessage = `📸 Receipt processed! Please confirm the details:\n\n` +
+          `💰 Amount: $${aiResult.amount}\n` +
+          `📝 Description: ${finalDescription || '(No description - add one when editing)'}${userDescription ? ' ✏️' : (finalDescription ? ' 🤖' : ' ✏️')}\n` +
+          `🏪 Merchant: ${aiResult.merchant || 'Unknown'}\n` +
+          `📂 Category: ${aiResult.category || 'Others'}\n` +
+          (aiResult.date ? `📅 Date: ${aiResult.date}\n` : '') +
+          `\n` +
+          `${userDescription ? '✏️ Using your description' : (finalDescription ? '🤖 AI generated description' : '📝 No description found - you can add one by editing')}\n` +
+          `Is this correct?`;
+
+        const keyboard = {
+          inline_keyboard: [
+            [
+              { text: '✅ Confirm', callback_data: 'receipt_confirm' },
+              { text: '✏️ Edit', callback_data: 'receipt_edit' }
+            ],
+            [
+              { text: '❌ Cancel', callback_data: 'receipt_cancel' }
+            ]
+          ]
+        };
+
+        if (this.telegramBot.bot) {
+          await this.telegramBot.bot.sendMessage(chatId, confirmationMessage, {
+            reply_markup: keyboard
+          });
+        }
       }
 
-      // Notify user via Telegram
-      if (chatId) {
-        const receipt = await Receipt.findById(receiptId);
-        await TelegramBot.notifyTransactionProcessed(chatId, updatedTransaction, receipt);
-      }
-
-      return { success: true, transaction: updatedTransaction };
+      return { success: true, aiResult: aiResult };
 
     } catch (error) {
       // Update receipt status to failed
       await Receipt.updateProcessingStatus(receiptId, 'failed');
-      
+
       // Notify WebSocket clients that processing failed
       if (this.webSocketEmitter) {
         this.webSocketEmitter.notifyReceiptProcessingFailed(userId, receiptId, error.message);
       }
-      
+
       throw error;
     }
   }
@@ -215,7 +251,7 @@ class ProcessingQueue {
   async processEmailJob(payload) {
     // This will be implemented when we add email processing
     const { emailId, userId, emailData } = payload;
-    
+
     // For now, just mark as completed
     console.log('Email processing not yet implemented:', emailId);
     return { success: true };

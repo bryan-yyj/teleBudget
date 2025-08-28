@@ -51,6 +51,9 @@ ProcessingQueue.initialize();
 // Inject ProcessingQueue into TelegramBot to avoid circular dependency
 TelegramBot.setProcessingQueue(ProcessingQueue);
 
+// Inject TelegramBot into ProcessingQueue for receipt confirmations
+ProcessingQueue.setTelegramBot(TelegramBot);
+
 // Make socket.io and WebSocket emitter available to routes
 app.use((req, res, next) => {
   req.io = io;
