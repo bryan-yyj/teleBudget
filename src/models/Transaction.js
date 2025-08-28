@@ -68,8 +68,8 @@ class Transaction {
       const result = await Database.run(
         `INSERT INTO transactions 
          (user_id, amount, currency, description, category, merchant, transaction_date, 
-          source, source_reference, confidence_score, is_verified)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          payment_method, source, source_reference, confidence_score, is_verified)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           transactionData.userId,
           transactionData.amount,
@@ -77,7 +77,8 @@ class Transaction {
           transactionData.description,
           transactionData.category,
           transactionData.merchant,
-          transactionData.transactionDate,
+          transactionData.transaction_date || transactionData.transactionDate,
+          transactionData.payment_method || null,
           transactionData.source,
           transactionData.sourceReference,
           transactionData.confidenceScore || 1.0,

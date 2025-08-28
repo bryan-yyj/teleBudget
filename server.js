@@ -10,6 +10,7 @@ const { Server } = require('socket.io');
 const Database = require('./src/database/Database');
 const WebSocketEmitter = require('./src/utils/WebSocketEmitter');
 const ProcessingQueue = require('./src/services/ProcessingQueue');
+const TelegramBot = require('./src/services/TelegramBot');
 const telegramRoutes = require('./src/routes/telegram');
 const transactionRoutes = require('./src/routes/transactions');
 const aiRoutes = require('./src/routes/ai');
@@ -46,6 +47,9 @@ Database.initialize();
 const webSocketEmitter = new WebSocketEmitter(io);
 ProcessingQueue.setWebSocketEmitter(webSocketEmitter);
 ProcessingQueue.initialize();
+
+// Inject ProcessingQueue into TelegramBot to avoid circular dependency
+TelegramBot.setProcessingQueue(ProcessingQueue);
 
 // Make socket.io and WebSocket emitter available to routes
 app.use((req, res, next) => {

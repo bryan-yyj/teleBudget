@@ -29,6 +29,7 @@ class Database {
         
         console.log('📦 Connected to SQLite database');
         this.createTables()
+          .then(() => this.runMigrations())
           .then(() => {
             console.log('✅ Database tables initialized');
             resolve();
@@ -61,6 +62,7 @@ class Database {
         category TEXT,
         merchant TEXT,
         transaction_date DATETIME NOT NULL,
+        payment_method TEXT, -- 'Cash', 'PayLah!', 'Credit Card', etc.
         source TEXT NOT NULL, -- 'telegram', 'email', 'manual'
         source_reference TEXT, -- message_id, email_id, etc.
         confidence_score REAL DEFAULT 1.0,
@@ -156,6 +158,27 @@ class Database {
         });
       });
     });
+  }
+
+  // Run database migrations
+  async runMigrations() {
+    try {
+      // Check if payment_method column exists
+      const tableInfo = await this.all("PRAGMA table_info(transactions)");
+      const hasPaymentMethod = tableInfo.some(col => col.name === 'payment_method');
+      
+      if (!hasPaymentMethod) {
+        console.log('🔄 Adding payment_method column to transactions table...');
+        await this.run('ALTER TABLE transactions ADD COLUMN payment_method TEXT');
+        console.log('✅ Migration completed: payment_method column added');
+      }
+
+      // Add more migrations here as needed
+      
+    } catch (error) {
+      console.error('Error running migrations:', error);
+      throw error;
+    }
   }
 
   // Insert default categories

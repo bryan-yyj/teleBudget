@@ -138,8 +138,33 @@ class ProcessingQueue {
       // Process with Ollama AI
       const aiResult = await OllamaService.processReceipt(imagePath);
       
-      if (!aiResult || !aiResult.amount) {
-        throw new Error('AI processing failed to extract transaction data');
+      if (!aiResult || aiResult.amount <= 0) {
+        // If AI processing failed, create a placeholder transaction for manual review
+        const updatedTransaction = await Transaction.update(transactionId, {
+          amount: 0.01, // Minimal amount to indicate manual review needed
+          description: aiResult?.description || 'Receipt processing failed - please review manually',
+          category: 'Others',
+          merchant: aiResult?.merchant || 'Unknown',
+          transactionDate: aiResult?.date || new Date().toISOString(),
+          confidenceScore: 0.1,
+          isVerified: 0
+        });
+
+        await Receipt.updateProcessingStatus(receiptId, 'failed', {
+          confidence: 0.1,
+          rawResponse: aiResult,
+          error: 'AI processing failed to extract valid transaction data'
+        });
+
+        // Notify user via Telegram about the failure
+        if (chatId) {
+          await TelegramBot.notifyTransactionProcessed(chatId, updatedTransaction, {
+            ai_confidence: 0.1,
+            processing_status: 'failed'
+          });
+        }
+
+        return { success: false, transaction: updatedTransaction, error: 'AI processing failed' };
       }
 
       // Update transaction with AI results
@@ -148,9 +173,10 @@ class ProcessingQueue {
         description: aiResult.description || 'AI processed receipt',
         category: aiResult.category || 'Others',
         merchant: aiResult.merchant || 'Unknown',
-        transactionDate: aiResult.date || new Date().toISOString(),
-        confidenceScore: aiResult.confidence || 0.5,
-        isVerified: aiResult.confidence > 0.8 ? 1 : 0
+        transaction_date: aiResult.date || new Date().toISOString(),
+        payment_method: aiResult.payment_method || null,
+        confidence_score: aiResult.confidence || 0.5,
+        is_verified: aiResult.confidence > 0.8 ? 1 : 0
       });
 
       // Update receipt with AI results

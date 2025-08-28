@@ -4,40 +4,64 @@ const path = require('path');
 
 class OllamaService {
   constructor() {
-    this.baseUrl = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
+    this.baseUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
     this.model = process.env.OLLAMA_MODEL || 'llava:latest';
   }
 
   async processReceipt(imagePath) {
     try {
       console.log('Processing receipt with Ollama:', imagePath);
-      
+
       // Read image as base64
       const imageBuffer = fs.readFileSync(imagePath);
       const imageBase64 = imageBuffer.toString('base64');
-      
-      const prompt = `Analyze this receipt image and extract transaction details. Return a JSON response with the following structure:
+
+      const prompt = `Analyze this image and extract transaction details. This could be a receipt, payment confirmation, bank transfer, or any financial transaction. Return a JSON response with the following structure:
       {
         "amount": "numeric amount (e.g., 12.50)",
         "currency": "currency code (e.g., SGD)",
-        "description": "brief description of the purchase",
-        "merchant": "store/merchant name",
+        "description": "brief description of the transaction",
+        "merchant": "recipient/merchant/store name",
         "date": "transaction date in ISO format",
         "category": "category from: Food & Dining, Transportation, Shopping, Entertainment, Bills & Utilities, Healthcare, Education, Others",
-        "items": ["list of purchased items"],
+        "payment_method": "detected payment method if visible: Cash, PayLah!, GrabPay, Credit Card, etc.",
         "confidence": "confidence score between 0.0 and 1.0"
       }
 
-      Important guidelines:
-      - For Singapore receipts, currency is typically SGD
-      - Extract the total amount including GST/tax
-      - Use merchant name from receipt header
-      - Choose the most appropriate category
-      - If date is unclear, use current date
-      - Set confidence based on text clarity and completeness
-      - Include itemized purchases if visible
+      CRITICAL ANALYSIS GUIDELINES:
+      1. TRANSACTION TYPE IDENTIFICATION:
+         - If you see "Transfer", "Send", "Sent to", "Payment to" → This is a money transfer, NOT a purchase
+         - If you see store names, receipts, purchases → This is a purchase transaction
+         - If you see bank/payment app interfaces → Analyze what type of transaction it is
 
-      Return only valid JSON without any additional text.`;
+      2. CATEGORIZATION RULES:
+         - Money transfers to individuals → "Others" (unless clearly for a service)
+         - Airport/travel related → "Transportation" 
+         - Food purchases → "Food & Dining"
+         - Shopping/retail → "Shopping"
+         - Bills/utilities → "Bills & Utilities"
+
+      3. DESCRIPTION GUIDELINES:
+         - For transfers: "Transfer to [recipient name]" or "Payment to [recipient]"
+         - For purchases: "[Item/service] at [merchant]"
+         - Be specific about what the transaction actually represents
+
+      4. MERCHANT/RECIPIENT:
+         - For transfers: Use the recipient's name if visible
+         - For purchases: Use the store/merchant name
+         - If unclear, use "Unknown"
+
+      5. CONFIDENCE SCORING:
+         - High (0.8-1.0): Clear text, obvious transaction type, all details visible
+         - Medium (0.5-0.7): Some text unclear but main details extractable
+         - Low (0.1-0.4): Poor image quality or ambiguous transaction type
+
+      6. SPECIAL CASES:
+         - If image shows payment apps (PayNow, GrabPay, etc.), focus on the transaction details
+         - If multiple amounts visible, use the final/total amount
+         - If transaction is in foreign currency, note the original currency
+
+      Return only valid JSON without any additional text or explanation.`;
 
       const response = await axios.post(`${this.baseUrl}/api/generate`, {
         model: this.model,
@@ -49,7 +73,8 @@ class OllamaService {
           top_p: 0.9
         }
       }, {
-        timeout: 60000 // 60 second timeout
+        timeout: 60000, // 60 second timeout
+        family: 4 // Force IPv4
       });
 
       if (!response.data || !response.data.response) {
@@ -98,7 +123,7 @@ class OllamaService {
         merchant: parsedResult.merchant || 'Unknown',
         date: this.parseDate(parsedResult.date),
         category: this.validateCategory(parsedResult.category),
-        items: Array.isArray(parsedResult.items) ? parsedResult.items : [],
+        payment_method: parsedResult.payment_method || null,
         confidence: this.validateConfidence(parsedResult.confidence)
       };
 
@@ -107,12 +132,12 @@ class OllamaService {
 
     } catch (error) {
       console.error('Ollama processing error:', error);
-      
+
       // Return fallback result for partial processing
       return {
-        amount: 0,
+        amount: 0.01, // Small amount to indicate manual review needed
         currency: 'SGD',
-        description: 'Failed to process receipt - please review manually',
+        description: 'Receipt processing failed - please review manually',
         merchant: 'Unknown',
         date: new Date().toISOString(),
         category: 'Others',
@@ -136,7 +161,7 @@ class OllamaService {
 
   parseDate(dateString) {
     if (!dateString) return new Date().toISOString();
-    
+
     try {
       const date = new Date(dateString);
       return isNaN(date.getTime()) ? new Date().toISOString() : date.toISOString();
@@ -205,6 +230,20 @@ class OllamaService {
     return Math.max(0, Math.min(1, parsed)); // Clamp between 0 and 1
   }
 
+  getTimeOfDay(dateString) {
+    try {
+      const date = new Date(dateString || new Date());
+      const hour = date.getHours();
+
+      if (hour >= 5 && hour < 12) return 'morning';
+      if (hour >= 12 && hour < 17) return 'afternoon';
+      if (hour >= 17 && hour < 21) return 'evening';
+      return 'night';
+    } catch {
+      return 'unknown';
+    }
+  }
+
   async checkOllamaStatus() {
     try {
       const response = await axios.get(`${this.baseUrl}/api/tags`, { timeout: 5000 });
@@ -224,7 +263,7 @@ class OllamaService {
   async pullModel(modelName = this.model) {
     try {
       console.log(`Pulling Ollama model: ${modelName}`);
-      
+
       const response = await axios.post(`${this.baseUrl}/api/pull`, {
         name: modelName
       }, {
@@ -235,6 +274,59 @@ class OllamaService {
     } catch (error) {
       console.error(`Error pulling model ${modelName}:`, error);
       return { success: false, error: error.message };
+    }
+  }
+
+  async processTextPrompt(prompt) {
+    try {
+      console.log('Processing text prompt with Ollama');
+
+      const response = await axios.post(`${this.baseUrl}/api/generate`, {
+        model: this.model, // Use the same model (llava can handle text-only)
+        prompt: prompt,
+        stream: false,
+        options: {
+          temperature: 0.1,
+          top_p: 0.9
+        }
+      }, {
+        timeout: 30000,
+        family: 4 // Force IPv4
+      });
+
+      if (!response.data || !response.data.response) {
+        throw new Error('No response from Ollama');
+      }
+
+      const aiResponse = response.data.response.trim();
+      console.log('Raw Ollama text response:', aiResponse);
+
+      // Try to parse JSON from the response
+      try {
+        const cleanedResponse = aiResponse
+          .replace(/```json\s*/g, '')
+          .replace(/```\s*/g, '')
+          .replace(/^\s*[\r\n]/gm, '')
+          .trim();
+
+        return JSON.parse(cleanedResponse);
+      } catch (parseError) {
+        console.error('Failed to parse JSON response:', parseError);
+        // Try to extract JSON using regex
+        const jsonMatch = aiResponse.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+          try {
+            return JSON.parse(jsonMatch[0]);
+          } catch (retryError) {
+            throw new Error('Unable to parse AI response as JSON');
+          }
+        } else {
+          throw new Error('No valid JSON found in AI response');
+        }
+      }
+    } catch (error) {
+      console.error('Ollama text processing error:', error);
+      throw error;
     }
   }
 

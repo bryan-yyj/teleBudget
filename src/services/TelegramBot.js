@@ -3,21 +3,31 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const https = require('https');
 
 const User = require('../models/User');
 const Transaction = require('../models/Transaction');
 const Receipt = require('../models/Receipt');
-const ProcessingQueue = require('../services/ProcessingQueue');
+// ProcessingQueue will be injected to avoid circular dependency
 
 class TelegramBotService {
   constructor() {
     this.bot = null;
     this.webhookUrl = process.env.TELEGRAM_WEBHOOK_URL;
-    this.botToken = process.env.TELEGRAM_BOT_TOKEN;
+    // Temporarily hardcode the token since .env has caching issues
+    this.botToken = '8493139780:AAFIKXgSz52zkIIsE_hkllTO1RBmkBvt5k4';
+    this.processingQueue = null;
+    
+    // Session management for multi-step conversations
+    this.userSessions = new Map(); // chatId -> session data
     
     if (this.botToken && this.botToken !== 'your_telegram_bot_token_from_botfather') {
       try {
-        this.bot = new TelegramBot(this.botToken);
+        this.bot = new TelegramBot(this.botToken, { polling: true });
+        
+        // Setup message handlers
+        this.setupMessageHandlers();
+        
         // Setup commands asynchronously to avoid blocking startup
         this.setupCommands().catch(err => {
           console.error('❌ Failed to set up bot commands:', err.message);
@@ -38,6 +48,7 @@ class TelegramBotService {
       // Set bot commands
       await this.bot.setMyCommands([
         { command: 'start', description: 'Start using TeleBudget' },
+        { command: 'add', description: 'Add a new transaction (interactive)' },
         { command: 'help', description: 'Get help and usage instructions' },
         { command: 'stats', description: 'View your spending statistics' },
         { command: 'recent', description: 'View recent transactions' },
@@ -48,6 +59,37 @@ class TelegramBotService {
       console.error('❌ Failed to set up bot commands:', error.message);
       console.log('💡 This usually means your bot token is invalid');
     }
+  }
+
+  setupMessageHandlers() {
+    if (!this.bot) return;
+
+    // Handle all messages
+    this.bot.on('message', (msg) => {
+      console.log(`📨 Received message from ${msg.from.first_name}: "${msg.text || '[photo/file]'}"`);
+      this.handleMessage(msg).catch(err => {
+        console.error('❌ Error handling message:', err.message);
+      });
+    });
+
+    // Handle callback queries (button presses)
+    this.bot.on('callback_query', (query) => {
+      console.log(`🔘 Button pressed by ${query.from.first_name}: "${query.data}"`);
+      this.handleCallbackQuery(query).catch(err => {
+        console.error('❌ Error handling callback query:', err.message);
+      });
+    });
+
+    // Handle polling errors
+    this.bot.on('polling_error', (error) => {
+      console.error('❌ Telegram polling error:', error.message);
+    });
+
+    console.log('✅ Telegram message handlers set up');
+  }
+
+  setProcessingQueue(processingQueue) {
+    this.processingQueue = processingQueue;
   }
 
   async setWebhook() {
@@ -108,8 +150,16 @@ class TelegramBotService {
     const chatId = message.chat.id;
     const text = message.text.trim();
 
+    // Check if user is in a session (multi-step transaction)
+    if (this.userSessions.has(chatId)) {
+      await this.handleSessionMessage(message, user);
+      return;
+    }
+
     if (text.startsWith('/start')) {
       await this.sendWelcomeMessage(chatId);
+    } else if (text.startsWith('/add') || text.startsWith('/transaction')) {
+      await this.startInteractiveTransaction(chatId, user);
     } else if (text.startsWith('/help')) {
       await this.sendHelpMessage(chatId);
     } else if (text.startsWith('/stats')) {
@@ -119,10 +169,46 @@ class TelegramBotService {
     } else if (text.startsWith('/categories')) {
       await this.sendCategoriesMessage(chatId, user);
     } else {
-      // Check if it looks like a manual transaction entry
-      const transactionMatch = text.match(/^(\d+(?:\.\d{2})?)\s+(.+)$/);
-      if (transactionMatch) {
-        await this.handleManualTransaction(chatId, user, transactionMatch[1], transactionMatch[2]);
+      // Check if it looks like a manual transaction entry - support multiple formats
+      let amount, description;
+      
+      // Format 1: "$10 on macdonalds" or "$10.50 at starbucks"
+      const dollarMatch = text.match(/^\$(\d+(?:\.\d{2})?)\s+(on|at|for)\s+(.+)$/i);
+      if (dollarMatch) {
+        amount = dollarMatch[1];
+        description = dollarMatch[3];
+      } else {
+        // Format 2: "weekly gym $5" or "coffee $3.50"
+        const descriptionFirstMatch = text.match(/^(.+)\s+\$(\d+(?:\.\d{2})?)$/i);
+        if (descriptionFirstMatch) {
+          amount = descriptionFirstMatch[2];
+          description = descriptionFirstMatch[1];
+        } else {
+          // Format 3: "$5 weekly gym" or "$3.50 coffee"
+          const dollarFirstMatch = text.match(/^\$(\d+(?:\.\d{2})?)\s+(.+)$/i);
+          if (dollarFirstMatch) {
+            amount = dollarFirstMatch[1];
+            description = dollarFirstMatch[2];
+          } else {
+            // Format 4: "10.50 coffee" or "15 lunch" (no dollar sign)
+            const simpleMatch = text.match(/^(\d+(?:\.\d{2})?)\s+(.+)$/);
+            if (simpleMatch) {
+              amount = simpleMatch[1];
+              description = simpleMatch[2];
+            } else {
+              // Format 5: "spent $10 on coffee" or "paid 15.50 for lunch"
+              const spentMatch = text.match(/^(spent|paid)\s+\$?(\d+(?:\.\d{2})?)\s+(on|for|at)\s+(.+)$/i);
+              if (spentMatch) {
+                amount = spentMatch[2];
+                description = spentMatch[4];
+              }
+            }
+          }
+        }
+      }
+      
+      if (amount && description) {
+        await this.handleManualTransaction(chatId, user, amount, description);
       } else {
         await this.sendUnknownCommandMessage(chatId);
       }
@@ -149,7 +235,7 @@ class TelegramBotService {
         description: 'Processing receipt...',
         category: 'Others',
         merchant: 'Unknown',
-        transactionDate: new Date().toISOString(),
+        transaction_date: new Date().toISOString(),
         source: 'telegram',
         sourceReference: message.message_id.toString(),
         confidenceScore: 0,
@@ -164,13 +250,19 @@ class TelegramBotService {
       });
 
       // Add to processing queue
-      await ProcessingQueue.add('receipt', {
-        receiptId: receipt.id,
-        transactionId: transaction.id,
-        userId: user.id,
-        chatId: chatId,
-        imagePath: imagePath
-      });
+      if (this.processingQueue) {
+        await this.processingQueue.add('receipt', {
+          receiptId: receipt.id,
+          transactionId: transaction.id,
+          userId: user.id,
+          chatId: chatId,
+          imagePath: imagePath
+        });
+      } else {
+        console.error('ProcessingQueue not available - receipt will not be processed');
+        await this.bot.sendMessage(chatId, '❌ Processing service unavailable. Please try again later.');
+        return;
+      }
 
       await this.bot.sendMessage(chatId, '⏳ Your receipt has been queued for processing. You\'ll be notified when it\'s ready!');
       
@@ -195,24 +287,26 @@ class TelegramBotService {
 
   async downloadImage(fileId, prefix = 'image') {
     try {
-      const file = await this.bot.getFile(fileId);
-      const filePath = file.file_path;
-      const fileUrl = `https://api.telegram.org/file/bot${this.botToken}/${filePath}`;
-      
-      // Generate unique filename
-      const extension = path.extname(filePath) || '.jpg';
-      const filename = `${prefix}_${Date.now()}_${crypto.randomBytes(8).toString('hex')}${extension}`;
-      const localPath = path.join('uploads', filename);
-      
       // Ensure uploads directory exists
       if (!fs.existsSync('uploads')) {
         fs.mkdirSync('uploads', { recursive: true });
       }
       
-      // Download the file
-      const response = await fetch(fileUrl);
-      const buffer = await response.buffer();
-      fs.writeFileSync(localPath, buffer);
+      // Generate unique filename
+      const filename = `${prefix}_${Date.now()}_${crypto.randomBytes(8).toString('hex')}.jpg`;
+      const localPath = path.join('uploads', filename);
+      
+      // Use the bot's built-in download method
+      await this.bot.downloadFile(fileId, 'uploads');
+      
+      // The bot downloads with the original filename, so we need to rename it
+      const file = await this.bot.getFile(fileId);
+      const originalPath = path.join('uploads', path.basename(file.file_path));
+      
+      // Rename to our generated filename
+      if (fs.existsSync(originalPath)) {
+        fs.renameSync(originalPath, localPath);
+      }
       
       return localPath;
     } catch (error) {
@@ -223,23 +317,28 @@ class TelegramBotService {
 
   async handleManualTransaction(chatId, user, amount, description) {
     try {
+      // Use AI to categorize and enhance the description
+      const enhancedData = await this.enhanceManualTransaction(description, amount);
+      
       const transaction = await Transaction.create({
         userId: user.id,
         amount: parseFloat(amount),
-        description: description,
-        category: 'Others',
-        merchant: 'Manual Entry',
-        transactionDate: new Date().toISOString(),
+        description: enhancedData.description,
+        category: enhancedData.category,
+        merchant: enhancedData.merchant,
+        transaction_date: new Date().toISOString(),
         source: 'telegram',
         sourceReference: 'manual',
-        confidenceScore: 1.0,
+        confidenceScore: enhancedData.confidence,
         isVerified: 1
       });
 
       await this.bot.sendMessage(chatId, 
         `✅ Transaction recorded!\n\n` +
         `💰 Amount: SGD ${amount}\n` +
-        `📝 Description: ${description}\n` +
+        `📝 Description: ${enhancedData.description}\n` +
+        `🏷️ Category: ${enhancedData.category}\n` +
+        `🏪 Merchant: ${enhancedData.merchant}\n` +
         `📅 Date: ${new Date().toLocaleDateString()}\n\n` +
         `Use /recent to view your recent transactions.`
       );
@@ -247,6 +346,102 @@ class TelegramBotService {
       console.error('Error creating manual transaction:', error);
       await this.bot.sendMessage(chatId, '❌ Error recording transaction. Please try again.');
     }
+  }
+
+  async enhanceManualTransaction(description, amount) {
+    try {
+      // Import OllamaService here to avoid circular dependency
+      const OllamaService = require('./OllamaService');
+      
+      const prompt = `Analyze this manual transaction and enhance it. Return a JSON response:
+      
+      Transaction: "${description}" for SGD ${amount}
+      
+      {
+        "description": "enhanced description (e.g., 'McDonald's meal' instead of just 'macs')",
+        "category": "category from: Food & Dining, Transportation, Shopping, Entertainment, Bills & Utilities, Healthcare, Education, Others",
+        "merchant": "likely merchant name (e.g., 'McDonald's' for 'macs')",
+        "payment_method": "most likely payment method: Cash, PayLah!, GrabPay, Credit Card, etc.",
+        "confidence": "confidence score 0.0-1.0"
+      }
+      
+      Guidelines:
+      - "macs" = McDonald's → Food & Dining, likely PayLah!/Credit Card
+      - "starbucks", "coffee" → Food & Dining, likely Credit Card
+      - "grab", "taxi" → Transportation, likely GrabPay/Cash
+      - "gym" → Healthcare, likely GIRO/Credit Card
+      - Expand abbreviations to full names
+      - Suggest realistic payment methods
+      
+      Return only valid JSON.`;
+
+      const response = await OllamaService.processTextPrompt(prompt);
+      
+      if (response && response.description) {
+        return {
+          description: response.description,
+          category: response.category || 'Others',
+          merchant: response.merchant || 'Manual Entry',
+          payment_method: response.payment_method || null,
+          confidence: response.confidence || 0.8
+        };
+      }
+    } catch (error) {
+      console.error('Error enhancing manual transaction:', error);
+    }
+    
+    // Fallback to basic categorization
+    return this.basicCategorization(description);
+  }
+
+  basicCategorization(description) {
+    const desc = description.toLowerCase();
+    
+    // Food & Dining
+    if (desc.includes('macs') || desc.includes('mcdonald') || 
+        desc.includes('coffee') || desc.includes('starbucks') || 
+        desc.includes('food') || desc.includes('lunch') || 
+        desc.includes('dinner') || desc.includes('breakfast') ||
+        desc.includes('restaurant') || desc.includes('cafe')) {
+      return {
+        description: desc.includes('macs') ? 'McDonald\'s meal' : description,
+        category: 'Food & Dining',
+        merchant: desc.includes('macs') ? 'McDonald\'s' : 
+                 desc.includes('starbucks') ? 'Starbucks' : 'Restaurant',
+        confidence: 0.7
+      };
+    }
+    
+    // Transportation
+    if (desc.includes('grab') || desc.includes('taxi') || 
+        desc.includes('bus') || desc.includes('mrt') || 
+        desc.includes('transport')) {
+      return {
+        description: description,
+        category: 'Transportation',
+        merchant: desc.includes('grab') ? 'Grab' : 'Transport',
+        confidence: 0.7
+      };
+    }
+    
+    // Shopping
+    if (desc.includes('shopping') || desc.includes('mall') || 
+        desc.includes('store') || desc.includes('buy')) {
+      return {
+        description: description,
+        category: 'Shopping',
+        merchant: 'Retail Store',
+        confidence: 0.6
+      };
+    }
+    
+    // Default
+    return {
+      description: description,
+      category: 'Others',
+      merchant: 'Manual Entry',
+      confidence: 0.5
+    };
   }
 
   async sendWelcomeMessage(chatId) {
@@ -261,8 +456,9 @@ Your AI-powered budget tracking assistant. I can help you:
 🏷️ Categorize your expenses automatically
 
 To get started:
-1. Send me a receipt photo and I'll extract the transaction details
-2. Or type: \`15.50 Coffee at Starbucks\` for manual entry
+1. 📸 Send me a photo (receipt, payment confirmation, transfer) and I'll extract the details
+2. 💬 Type /add for interactive transaction entry with payment method selection
+3. ⚡ Or quick entry: \`$15.50 on coffee\` or \`25 groceries\`
 
 Type /help for more commands!
     `;
@@ -276,20 +472,28 @@ Type /help for more commands!
 
 **Available Commands:**
 /start - Start using TeleBudget
+/add - Interactive transaction entry (recommended!)
 /help - Show this help message
 /stats - View your spending statistics
 /recent - View recent transactions
 /categories - View available categories
 
 **How to use:**
-📸 **Receipt scanning:** Just send me a photo of your receipt
-💬 **Manual entry:** Type \`amount description\` (e.g., \`12.50 Lunch\`)
+📸 **Receipt scanning:** Send me a photo of your receipt or payment confirmation
+💬 **Interactive entry:** Use /add for step-by-step transaction entry with:
+   • Smart payment method suggestions based on your habits
+   • AI-powered categorization and merchant detection
+   • Personalized experience that learns from your patterns
+⚡ **Quick entry:** Type transactions in any of these formats:
+   • \`$10 on coffee\` or \`$15.50 at Starbucks\`
+   • \`12.50 lunch\` or \`25 groceries\`
+   • \`spent $10 on coffee\` or \`paid 15.50 for lunch\`
 
 **Tips:**
-• For best results, ensure receipts are clear and well-lit
-• Include GST/tax information when visible
+• For best results, ensure photos are clear and well-lit
+• I can process receipts, payment confirmations, and bank transfers
 • Manual transactions are immediately verified
-• AI will automatically categorize your expenses
+• AI will automatically categorize your expenses and detect transaction types
 • Receipt processing may take 10-30 seconds
     `;
     
@@ -412,9 +616,293 @@ ${confidence < 0.8 ? 'You can review and edit this transaction in the mobile app
     return imageTypes.includes(document.mime_type);
   }
 
+  // Interactive transaction entry system
+  async startInteractiveTransaction(chatId, user) {
+    this.userSessions.set(chatId, {
+      step: 'amount',
+      userId: user.id,
+      data: {}
+    });
+
+    await this.bot.sendMessage(chatId, 
+      '💰 Let\'s add a new transaction!\n\n' +
+      'Please enter the amount (e.g., 15.50 or $15.50):'
+    );
+  }
+
+  async handleSessionMessage(message, user) {
+    const chatId = message.chat.id;
+    const text = message.text.trim();
+    const session = this.userSessions.get(chatId);
+
+    if (!session) return;
+
+    try {
+      switch (session.step) {
+        case 'amount':
+          await this.handleAmountInput(chatId, text, session);
+          break;
+        case 'description':
+          await this.handleDescriptionInput(chatId, text, session, user);
+          break;
+        case 'custom_payment':
+          await this.completeTransaction(chatId, session, text);
+          break;
+        default:
+          this.userSessions.delete(chatId);
+          await this.sendUnknownCommandMessage(chatId);
+      }
+    } catch (error) {
+      console.error('Error handling session message:', error);
+      this.userSessions.delete(chatId);
+      await this.bot.sendMessage(chatId, '❌ Something went wrong. Please try again.');
+    }
+  }
+
+  async handleAmountInput(chatId, text, session) {
+    // Parse amount from various formats
+    const amountMatch = text.match(/\$?(\d+(?:\.\d{1,2})?)/);
+    
+    if (!amountMatch) {
+      await this.bot.sendMessage(chatId, 
+        '❌ Please enter a valid amount (e.g., 15.50 or $15.50):'
+      );
+      return;
+    }
+
+    const amount = parseFloat(amountMatch[1]);
+    if (amount <= 0) {
+      await this.bot.sendMessage(chatId, 
+        '❌ Amount must be greater than 0. Please try again:'
+      );
+      return;
+    }
+
+    session.data.amount = amount;
+    session.step = 'description';
+
+    await this.bot.sendMessage(chatId, 
+      `✅ Amount: SGD ${amount.toFixed(2)}\n\n` +
+      '📝 Now, what was this transaction for? (e.g., coffee, lunch, grab ride):'
+    );
+  }
+
+  async handleDescriptionInput(chatId, text, session, user) {
+    session.data.description = text;
+
+    // Use AI to enhance and categorize
+    const enhancedData = await this.enhanceManualTransaction(text, session.data.amount);
+    session.data.enhancedData = enhancedData;
+
+    // Get user's payment method preferences
+    const paymentMethods = await this.getUserPaymentMethods(user.id);
+
+    await this.showPaymentMethodSelection(chatId, session, paymentMethods);
+  }
+
+  async getUserPaymentMethods(userId) {
+    try {
+      // Get user's most used payment methods from transaction history
+      const Database = require('../database/Database');
+      
+      const recentMethods = await Database.all(`
+        SELECT payment_method, COUNT(*) as usage_count
+        FROM transactions 
+        WHERE user_id = ? AND payment_method IS NOT NULL
+        GROUP BY payment_method 
+        ORDER BY usage_count DESC, MAX(created_at) DESC
+        LIMIT 6
+      `, [userId]);
+
+      // Default payment methods if user has no history
+      const defaultMethods = [
+        { payment_method: 'Cash', usage_count: 0 },
+        { payment_method: 'PayLah!', usage_count: 0 },
+        { payment_method: 'GrabPay', usage_count: 0 },
+        { payment_method: 'Credit Card', usage_count: 0 },
+        { payment_method: 'Debit Card', usage_count: 0 },
+        { payment_method: 'PayNow', usage_count: 0 }
+      ];
+
+      // Merge user methods with defaults, prioritizing user's habits
+      const allMethods = [...recentMethods];
+      defaultMethods.forEach(defaultMethod => {
+        if (!allMethods.find(m => m.payment_method === defaultMethod.payment_method)) {
+          allMethods.push(defaultMethod);
+        }
+      });
+
+      return allMethods.slice(0, 6); // Limit to 6 options
+    } catch (error) {
+      console.error('Error getting user payment methods:', error);
+      return [
+        { payment_method: 'Cash', usage_count: 0 },
+        { payment_method: 'PayLah!', usage_count: 0 },
+        { payment_method: 'Credit Card', usage_count: 0 }
+      ];
+    }
+  }
+
+  async showPaymentMethodSelection(chatId, session, paymentMethods) {
+    const { amount, description, enhancedData } = session.data;
+
+    // Create inline keyboard with payment methods
+    const keyboard = {
+      inline_keyboard: []
+    };
+
+    // Add payment method buttons (2 per row)
+    for (let i = 0; i < paymentMethods.length; i += 2) {
+      const row = [];
+      
+      const method1 = paymentMethods[i];
+      const emoji1 = this.getPaymentMethodEmoji(method1.payment_method);
+      const label1 = method1.usage_count > 0 ? 
+        `${emoji1} ${method1.payment_method} (${method1.usage_count})` : 
+        `${emoji1} ${method1.payment_method}`;
+      
+      row.push({
+        text: label1,
+        callback_data: `payment:${method1.payment_method}`
+      });
+
+      if (i + 1 < paymentMethods.length) {
+        const method2 = paymentMethods[i + 1];
+        const emoji2 = this.getPaymentMethodEmoji(method2.payment_method);
+        const label2 = method2.usage_count > 0 ? 
+          `${emoji2} ${method2.payment_method} (${method2.usage_count})` : 
+          `${emoji2} ${method2.payment_method}`;
+        
+        row.push({
+          text: label2,
+          callback_data: `payment:${method2.payment_method}`
+        });
+      }
+
+      keyboard.inline_keyboard.push(row);
+    }
+
+    // Add "Other" option
+    keyboard.inline_keyboard.push([{
+      text: '💳 Other payment method',
+      callback_data: 'payment:other'
+    }]);
+
+    const message = 
+      `📋 **Transaction Summary**\n\n` +
+      `💰 Amount: SGD ${amount.toFixed(2)}\n` +
+      `📝 Description: ${enhancedData.description}\n` +
+      `🏷️ Category: ${enhancedData.category}\n` +
+      `🏪 Merchant: ${enhancedData.merchant}\n\n` +
+      `💳 How did you pay for this?`;
+
+    await this.bot.sendMessage(chatId, message, {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard
+    });
+  }
+
+  getPaymentMethodEmoji(method) {
+    const emojiMap = {
+      'Cash': '💵',
+      'PayLah!': '📱',
+      'GrabPay': '🚗',
+      'Credit Card': '💳',
+      'Debit Card': '💳',
+      'PayNow': '📲',
+      'Bank Transfer': '🏦',
+      'NETS': '💳',
+      'Apple Pay': '📱',
+      'Google Pay': '📱'
+    };
+    return emojiMap[method] || '💳';
+  }
+
   async handleCallbackQuery(callbackQuery) {
-    // Handle inline keyboard callbacks if needed
-    await this.bot.answerCallbackQuery(callbackQuery.id);
+    const chatId = callbackQuery.message.chat.id;
+    const data = callbackQuery.data;
+    const session = this.userSessions.get(chatId);
+
+    try {
+      await this.bot.answerCallbackQuery(callbackQuery.id);
+
+      if (data.startsWith('payment:')) {
+        const paymentMethod = data.replace('payment:', '');
+        
+        if (paymentMethod === 'other') {
+          // Ask user to type custom payment method
+          session.step = 'custom_payment';
+          await this.bot.editMessageText(
+            '💳 Please type your payment method (e.g., "OCBC Credit Card", "Shopee Pay"):',
+            {
+              chat_id: chatId,
+              message_id: callbackQuery.message.message_id
+            }
+          );
+        } else {
+          await this.completeTransaction(chatId, session, paymentMethod);
+        }
+      }
+    } catch (error) {
+      console.error('Error handling callback query:', error);
+      await this.bot.sendMessage(chatId, '❌ Something went wrong. Please try again.');
+    }
+  }
+
+  async completeTransaction(chatId, session, paymentMethod) {
+    try {
+      const { amount, description, enhancedData } = session.data;
+
+      // Create the transaction
+      const transaction = await Transaction.create({
+        userId: session.userId,
+        amount: amount,
+        description: enhancedData.description,
+        category: enhancedData.category,
+        merchant: enhancedData.merchant,
+        transaction_date: new Date().toISOString(),
+        payment_method: paymentMethod,
+        source: 'telegram',
+        sourceReference: 'interactive',
+        confidenceScore: enhancedData.confidence,
+        isVerified: 1
+      });
+
+      // Clear session
+      this.userSessions.delete(chatId);
+
+      // Send confirmation
+      const emoji = this.getPaymentMethodEmoji(paymentMethod);
+      await this.bot.sendMessage(chatId, 
+        `✅ **Transaction Recorded!**\n\n` +
+        `💰 Amount: SGD ${amount.toFixed(2)}\n` +
+        `📝 Description: ${enhancedData.description}\n` +
+        `🏷️ Category: ${enhancedData.category}\n` +
+        `🏪 Merchant: ${enhancedData.merchant}\n` +
+        `${emoji} Payment: ${paymentMethod}\n` +
+        `📅 Date: ${new Date().toLocaleDateString()}\n\n` +
+        `Use /recent to view your transactions or /add to add another!`,
+        { parse_mode: 'Markdown' }
+      );
+
+      // Learn from this transaction for future suggestions
+      await this.updateUserPreferences(session.userId, enhancedData.category, paymentMethod);
+
+    } catch (error) {
+      console.error('Error completing transaction:', error);
+      this.userSessions.delete(chatId);
+      await this.bot.sendMessage(chatId, '❌ Error saving transaction. Please try again.');
+    }
+  }
+
+  async updateUserPreferences(userId, category, paymentMethod) {
+    try {
+      // This could be expanded to store user preferences in a separate table
+      // For now, the payment method history is tracked in transactions
+      console.log(`Learning: User ${userId} used ${paymentMethod} for ${category}`);
+    } catch (error) {
+      console.error('Error updating user preferences:', error);
+    }
   }
 }
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
 
 void main() {
@@ -8,459 +9,391 @@ void main() {
 }
 
 class TeleBudgetApp extends StatelessWidget {
-  const TeleBudgetApp({Key? key}) : super(key: key);
+  const TeleBudgetApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'TeleBudget',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark().copyWith(
-        primaryColor: const Color(0xFF6366F1),
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(
+          seedColor: const Color(0xFF6366F1),
+          brightness: Brightness.dark,
+        ),
         scaffoldBackgroundColor: const Color(0xFF0F0F23),
-        colorScheme: const ColorScheme.dark(
-          primary: Color(0xFF6366F1),
-          secondary: Color(0xFF8B5CF6),
-          surface: Color(0xFF1E1E2E),
-          background: Color(0xFF0F0F23),
-          onSurface: Color(0xFFE5E7EB),
-          onBackground: Color(0xFFE5E7EB),
-        ),
-        appBarTheme: const AppBarTheme(
-          backgroundColor: Color(0xFF1E1E2E),
-          elevation: 0,
-          centerTitle: true,
-          titleTextStyle: TextStyle(
-            color: Color(0xFFE5E7EB),
-            fontSize: 24,
-            fontWeight: FontWeight.w700,
-          ),
-        ),
-        cardTheme: CardTheme(
-          color: const Color(0xFF1E1E2E),
-          elevation: 8,
-          shadowColor: Colors.black.withOpacity(0.3),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
-          ),
-        ),
-        floatingActionButtonTheme: const FloatingActionButtonThemeData(
-          backgroundColor: Color(0xFF6366F1),
-          foregroundColor: Colors.white,
-        ),
+
       ),
-      home: const TransactionListScreen(),
+      home: const HomeScreen(),
     );
   }
 }
 
-class TransactionListScreen extends StatefulWidget {
-  const TransactionListScreen({Key? key}) : super(key: key);
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
 
   @override
-  State<TransactionListScreen> createState() => _TransactionListScreenState();
+  State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _TransactionListScreenState extends State<TransactionListScreen> {
-  List<Map<String, dynamic>> transactions = [];
+class _HomeScreenState extends State<HomeScreen> {
+  List<Transaction> transactions = [];
   bool isLoading = true;
-  String error = '';
-  
-  // Replace with your computer's IP address
-  static const String baseUrl = 'http://YOUR_IP_HERE:3000';
+  String? error;
+  String backendUrl = 'http://localhost:3000';
 
   @override
   void initState() {
     super.initState();
-    loadTransactions();
+    _loadSettings();
+    _loadTransactions();
   }
 
-  Future<void> loadTransactions() async {
+  Future<void> _loadSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      backendUrl = prefs.getString('backend_url') ?? 'http://localhost:3000';
+    });
+  }
+
+  Future<void> _saveBackendUrl(String url) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('backend_url', url);
+    setState(() {
+      backendUrl = url;
+    });
+  }
+
+  Future<void> _loadTransactions() async {
     setState(() {
       isLoading = true;
-      error = '';
+      error = null;
     });
 
     try {
-      // Test with mock data first
-      await Future.delayed(const Duration(seconds: 1));
-      
-      // Uncomment this when backend is ready:
-      /*
+      // Try to connect to backend
       final response = await http.get(
-        Uri.parse('$baseUrl/api/transactions/user/1'),
+        Uri.parse('$backendUrl/api/transactions/user/1'),
         headers: {'Content-Type': 'application/json'},
-      );
-      
+      ).timeout(const Duration(seconds: 5));
+
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
+        final List<dynamic> transactionData = data['transactions'] ?? [];
+        
         setState(() {
-          transactions = List<Map<String, dynamic>>.from(data['transactions'] ?? []);
+          transactions = transactionData
+              .map((json) => Transaction.fromJson(json))
+              .toList();
           isLoading = false;
         });
       } else {
-        throw Exception('Failed to load transactions');
+        throw Exception('Server returned ${response.statusCode}');
       }
-      */
-      
-      // Mock data for now
-      setState(() {
-        transactions = [
-          {
-            'id': 1,
-            'amount': 15.50,
-            'description': 'Coffee at Starbucks',
-            'category': 'Food & Dining',
-            'transactionDate': DateTime.now().subtract(const Duration(hours: 2)).toIso8601String(),
-            'merchant': 'Starbucks',
-            'source': 'manual'
-          },
-          {
-            'id': 2,
-            'amount': 45.00,
-            'description': 'Grocery shopping',
-            'category': 'Food & Dining',
-            'transactionDate': DateTime.now().subtract(const Duration(days: 1)).toIso8601String(),
-            'merchant': 'FairPrice',
-            'source': 'receipt'
-          },
-          {
-            'id': 3,
-            'amount': 8.50,
-            'description': 'Bus fare',
-            'category': 'Transportation',
-            'transactionDate': DateTime.now().subtract(const Duration(days: 2)).toIso8601String(),
-            'merchant': 'SBS Transit',
-            'source': 'telegram'
-          },
-        ];
-        isLoading = false;
-      });
-      
     } catch (e) {
+      // Fall back to mock data
       setState(() {
-        error = 'Failed to load transactions: $e';
+        transactions = _getMockTransactions();
+        error = 'Using offline mode: ${e.toString()}';
         isLoading = false;
       });
     }
   }
 
+  List<Transaction> _getMockTransactions() {
+    return [
+      Transaction(
+        id: 1,
+        amount: 15.50,
+        description: 'Coffee at Starbucks',
+        category: 'Food & Dining',
+        date: DateTime.now().subtract(const Duration(hours: 2)),
+        merchant: 'Starbucks',
+        source: 'manual',
+      ),
+      Transaction(
+        id: 2,
+        amount: 45.00,
+        description: 'Grocery shopping',
+        category: 'Food & Dining',
+        date: DateTime.now().subtract(const Duration(days: 1)),
+        merchant: 'FairPrice',
+        source: 'receipt',
+      ),
+      Transaction(
+        id: 3,
+        amount: 8.50,
+        description: 'Bus fare',
+        category: 'Transportation',
+        date: DateTime.now().subtract(const Duration(days: 2)),
+        merchant: 'SBS Transit',
+        source: 'telegram',
+      ),
+    ];
+  }
+
+  void _showSettingsDialog() {
+    final controller = TextEditingController(text: backendUrl);
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Backend Settings'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                labelText: 'Backend URL',
+                hintText: 'http://192.168.1.100:3000',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Enter your computer\'s IP address if using a phone',
+              style: TextStyle(fontSize: 12),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              _saveBackendUrl(controller.text.trim());
+              Navigator.pop(context);
+              _loadTransactions();
+            },
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final totalAmount = transactions.fold<double>(0, (sum, tx) => sum + (tx['amount'] as num).toDouble());
-    
+    final totalSpent = transactions.fold<double>(
+      0,
+      (sum, transaction) => sum + transaction.amount,
+    );
+
     return Scaffold(
-      body: CustomScrollView(
-        slivers: [
-          // Modern App Bar with gradient
-          SliverAppBar(
-            expandedHeight: 200,
-            floating: false,
-            pinned: true,
-            flexibleSpace: FlexibleSpaceBar(
-              title: const Text('TeleBudget'),
-              background: Container(
-                decoration: const BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                    colors: [
-                      Color(0xFF6366F1),
-                      Color(0xFF8B5CF6),
-                      Color(0xFFEC4899),
+      appBar: AppBar(
+        title: const Text('TeleBudget'),
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            onPressed: _showSettingsDialog,
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadTransactions,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Stats Card
+          Container(
+            margin: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF6366F1), Color(0xFF8B5CF6)],
+              ),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Total Spent',
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                        ),
+                      ),
+                      Text(
+                        '\$${totalSpent.toStringAsFixed(2)}',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 28,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
                     ],
                   ),
                 ),
-                child: Container(
+                Container(
+                  padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topCenter,
-                      end: Alignment.bottomCenter,
-                      colors: [
-                        Colors.transparent,
-                        Colors.black.withOpacity(0.3),
-                      ],
+                    color: Colors.white.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text(
+                    '${transactions.length}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
                     ),
                   ),
                 ),
-              ),
+              ],
             ),
-            actions: [
-              Container(
-                margin: const EdgeInsets.only(right: 16),
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: IconButton(
-                  icon: const Icon(Icons.refresh),
-                  onPressed: loadTransactions,
-                ),
-              ),
-            ],
           ),
-          
-          // Stats Cards
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.all(20),
+
+          // Connection Status
+          if (error != null)
+            Container(
+              margin: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.orange.withValues(alpha: 0.1),
+                border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+                borderRadius: BorderRadius.circular(8),
+              ),
               child: Row(
                 children: [
+                  const Icon(Icons.warning, color: Colors.orange, size: 20),
+                  const SizedBox(width: 8),
                   Expanded(
-                    child: _buildStatCard(
-                      'Total Spent',
-                      '\$${totalAmount.toStringAsFixed(2)}',
-                      Icons.trending_down,
-                      const Color(0xFFEF4444),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: _buildStatCard(
-                      'Transactions',
-                      '${transactions.length}',
-                      Icons.receipt_long,
-                      const Color(0xFF6366F1),
+                    child: Text(
+                      error!,
+                      style: const TextStyle(color: Colors.orange),
                     ),
                   ),
                 ],
               ),
             ),
-          ),
-          
-          // Connection Status
-          SliverToBoxAdapter(
-            child: Container(
-              margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                color: const Color(0xFF1E1E2E),
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(
-                  color: const Color(0xFF6366F1).withOpacity(0.3),
-                  width: 1,
-                ),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(
-                        Icons.wifi,
-                        color: error.isEmpty ? const Color(0xFF10B981) : const Color(0xFFEF4444),
-                        size: 20,
-                      ),
-                      const SizedBox(width: 8),
-                      const Text(
-                        'Connection Status',
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          fontSize: 16,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Backend: $baseUrl',
-                    style: TextStyle(
-                      color: const Color(0xFFE5E7EB).withOpacity(0.8),
-                      fontSize: 14,
-                    ),
-                  ),
-                  if (error.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    Container(
-                      padding: const EdgeInsets.all(12),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFEF4444).withOpacity(0.1),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(
-                          color: const Color(0xFFEF4444).withOpacity(0.3),
-                        ),
-                      ),
-                      child: Text(
-                        'Error: $error',
-                        style: const TextStyle(color: Color(0xFFEF4444)),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          ),
-          
+
+          const SizedBox(height: 16),
+
           // Transactions List
-          isLoading
-              ? const SliverFillRemaining(
-                  child: Center(
-                    child: CircularProgressIndicator(
-                      color: Color(0xFF6366F1),
-                    ),
-                  ),
-                )
-              : transactions.isEmpty
-                  ? SliverFillRemaining(
-                      child: Center(
+          Expanded(
+            child: isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : transactions.isEmpty
+                    ? const Center(
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Container(
-                              padding: const EdgeInsets.all(24),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF1E1E2E),
-                                borderRadius: BorderRadius.circular(50),
-                              ),
-                              child: const Icon(
-                                Icons.receipt_long,
-                                size: 48,
-                                color: Color(0xFF6B7280),
-                              ),
-                            ),
-                            const SizedBox(height: 24),
-                            const Text(
-                              'No transactions yet',
-                              style: TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
+                            Icon(Icons.receipt_long, size: 64, color: Colors.grey),
+                            SizedBox(height: 16),
                             Text(
-                              'Send a receipt to your Telegram bot to get started!',
-                              style: TextStyle(
-                                color: const Color(0xFFE5E7EB).withOpacity(0.7),
-                              ),
+                              'No transactions yet',
+                              style: TextStyle(fontSize: 18, color: Colors.grey),
+                            ),
+                            SizedBox(height: 8),
+                            Text(
+                              'Send a receipt to your Telegram bot!',
+                              style: TextStyle(color: Colors.grey),
                             ),
                           ],
                         ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        itemCount: transactions.length,
+                        itemBuilder: (context, index) {
+                          return TransactionCard(
+                            transaction: transactions[index],
+                          );
+                        },
                       ),
-                    )
-                  : SliverPadding(
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                      sliver: SliverList(
-                        delegate: SliverChildBuilderDelegate(
-                          (context, index) {
-                            final transaction = transactions[index];
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 12),
-                              child: TransactionCard(transaction: transaction),
-                            );
-                          },
-                          childCount: transactions.length,
-                        ),
-                      ),
-                    ),
+          ),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: const Text('Add transaction feature coming soon!'),
-              backgroundColor: const Color(0xFF1E1E2E),
-              behavior: SnackBarBehavior.floating,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-              ),
+            const SnackBar(
+              content: Text('Use your Telegram bot to add transactions!'),
             ),
           );
         },
-        icon: const Icon(Icons.add),
-        label: const Text('Add Transaction'),
-      ),
-    );
-  }
-  
-  Widget _buildStatCard(String title, String value, IconData icon, Color color) {
-    return Container(
-      padding: const EdgeInsets.all(20),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1E1E2E),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(
-          color: color.withOpacity(0.3),
-          width: 1,
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(8),
-                decoration: BoxDecoration(
-                  color: color.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Icon(icon, color: color, size: 20),
-              ),
-              const Spacer(),
-            ],
-          ),
-          const SizedBox(height: 16),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            title,
-            style: TextStyle(
-              color: const Color(0xFFE5E7EB).withOpacity(0.7),
-              fontSize: 14,
-            ),
-          ),
-        ],
+        icon: const Icon(Icons.telegram),
+        label: const Text('Telegram Bot'),
       ),
     );
   }
 }
 
+class Transaction {
+  final int id;
+  final double amount;
+  final String description;
+  final String category;
+  final DateTime date;
+  final String merchant;
+  final String source;
+
+  Transaction({
+    required this.id,
+    required this.amount,
+    required this.description,
+    required this.category,
+    required this.date,
+    required this.merchant,
+    required this.source,
+  });
+
+  factory Transaction.fromJson(Map<String, dynamic> json) {
+    return Transaction(
+      id: json['id'] as int,
+      amount: (json['amount'] as num).toDouble(),
+      description: json['description'] as String,
+      category: json['category'] as String,
+      date: DateTime.parse(json['transactionDate'] as String),
+      merchant: json['merchant'] as String? ?? '',
+      source: json['source'] as String,
+    );
+  }
+}
+
 class TransactionCard extends StatelessWidget {
-  final Map<String, dynamic> transaction;
-  
-  const TransactionCard({Key? key, required this.transaction}) : super(key: key);
+  final Transaction transaction;
+
+  const TransactionCard({
+    super.key,
+    required this.transaction,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final amount = (transaction['amount'] as num).toDouble();
-    final description = transaction['description'] as String;
-    final category = transaction['category'] as String;
-    final merchant = transaction['merchant'] as String? ?? '';
-    final source = transaction['source'] as String;
-    
-    DateTime date;
-    try {
-      date = DateTime.parse(transaction['transactionDate'] as String);
-    } catch (e) {
-      date = DateTime.now();
-    }
-
     return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: _getCategoryColor(category),
-          child: Text(
-            _getCategoryIcon(category),
-            style: const TextStyle(fontSize: 20),
+          backgroundColor: _getCategoryColor(transaction.category),
+          child: Icon(
+            _getCategoryIcon(transaction.category),
+            color: Colors.white,
+            size: 20,
           ),
         ),
         title: Text(
-          description,
+          transaction.description,
           style: const TextStyle(fontWeight: FontWeight.w500),
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (merchant.isNotEmpty) Text(merchant),
-            Text('$category • ${DateFormat('MMM dd, HH:mm').format(date)}'),
+            if (transaction.merchant.isNotEmpty)
+              Text(transaction.merchant),
+            Text(
+              '${transaction.category} • ${DateFormat('MMM dd, HH:mm').format(transaction.date)}',
+            ),
           ],
         ),
         trailing: Column(
@@ -468,18 +401,26 @@ class TransactionCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             Text(
-              '-\$${amount.toStringAsFixed(2)}',
+              '-\$${transaction.amount.toStringAsFixed(2)}',
               style: const TextStyle(
                 fontWeight: FontWeight.bold,
                 fontSize: 16,
                 color: Colors.red,
               ),
             ),
-            Text(
-              source.toUpperCase(),
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey[600],
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: _getSourceColor(transaction.source),
+                borderRadius: BorderRadius.circular(4),
+              ),
+              child: Text(
+                transaction.source.toUpperCase(),
+                style: const TextStyle(
+                  fontSize: 10,
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
             ),
           ],
@@ -491,26 +432,43 @@ class TransactionCard extends StatelessWidget {
   Color _getCategoryColor(String category) {
     switch (category.toLowerCase()) {
       case 'food & dining':
-        return Colors.orange[100]!;
+        return Colors.orange.shade600;
       case 'transportation':
-        return Colors.blue[100]!;
+        return Colors.blue.shade600;
       case 'shopping':
-        return Colors.purple[100]!;
+        return Colors.purple.shade600;
+      case 'entertainment':
+        return Colors.pink.shade600;
       default:
-        return Colors.grey[100]!;
+        return Colors.grey.shade600;
     }
   }
 
-  String _getCategoryIcon(String category) {
+  IconData _getCategoryIcon(String category) {
     switch (category.toLowerCase()) {
       case 'food & dining':
-        return '🍽️';
+        return Icons.restaurant;
       case 'transportation':
-        return '🚗';
+        return Icons.directions_car;
       case 'shopping':
-        return '🛍️';
+        return Icons.shopping_bag;
+      case 'entertainment':
+        return Icons.movie;
       default:
-        return '📦';
+        return Icons.category;
+    }
+  }
+
+  Color _getSourceColor(String source) {
+    switch (source.toLowerCase()) {
+      case 'telegram':
+        return Colors.blue;
+      case 'receipt':
+        return Colors.green;
+      case 'manual':
+        return Colors.orange;
+      default:
+        return Colors.grey;
     }
   }
 }
