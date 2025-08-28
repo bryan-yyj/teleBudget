@@ -14,8 +14,6 @@ class TelegramBotService {
   constructor() {
     this.bot = null;
     this.webhookUrl = process.env.TELEGRAM_WEBHOOK_URL;
-    // Temporarily hardcode the token since .env has caching issues
-    this.botToken = '8493139780:AAFIKXgSz52zkIIsE_hkllTO1RBmkBvt5k4';
     this.processingQueue = null;
     
     // Session management for multi-step conversations
