@@ -1,0 +1,7 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "telebudget-ai-smoke",
+  "main": "./ai-smoke-worker.js",
+  "compatibility_date": "2026-09-24",
+  "ai": { "binding": "AI" }
+}

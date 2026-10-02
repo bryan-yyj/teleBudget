@@ -1,0 +1,13 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "telebudget",
+  "pages_build_output_dir": "./public",
+  "compatibility_date": "2026-09-24",
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "telebudget-db",
+    "database_id": "0191b1df-de41-41c9-9e65-32555810bf33",
+    "migrations_dir": "../migrations"
+  }],
+  "queues": { "producers": [{ "binding": "UPDATES", "queue": "telebudget-updates" }] }
+}

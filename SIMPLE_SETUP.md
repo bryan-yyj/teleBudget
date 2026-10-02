@@ -20,7 +20,7 @@ A streamlined budget tracker with Telegram bot and AI receipt processing.
 
 **Your token will look like:**
 ```
-1234567890:ABCdefGHIjklMNOpqrSTUVwxyz1234567890
+replace_with_your_botfather_token
 ```
 
 **⚠️ Important:** This token is like a password - keep it secure!
@@ -57,7 +57,7 @@ Edit your `.env` file and replace these values:
 
 ```env
 # Your Bot Token (from step 1)
-TELEGRAM_BOT_TOKEN=1234567890:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+TELEGRAM_BOT_TOKEN=replace_with_your_botfather_token
 
 # Generate secure keys (run these commands):
 # For DATABASE_ENCRYPTION_KEY:
@@ -171,7 +171,7 @@ The database includes these tables:
 cat .env  # Look at TELEGRAM_BOT_TOKEN line
 
 # 2. Your token should look like:
-# TELEGRAM_BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrSTUVwxyz1234567890
+# TELEGRAM_BOT_TOKEN=replace_with_your_botfather_token
 
 # 3. Common issues:
 # - Token has spaces or extra characters

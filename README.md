@@ -1,5 +1,7 @@
 # TeleBudget - Comprehensive Budget Tracking System
 
+> **Current deployment:** The active backend is in [`cloudflare/`](cloudflare/README.md): Cloudflare Pages Functions, a Queue consumer Worker, D1, and Workers AI. Send a Telegram message such as `6.50 at macs` or a receipt photo. Receipt images are processed in memory and discarded. The older Express/Ollama instructions below describe the legacy local backend and are not used for Cloudflare deployment.
+
 A production-ready budget tracking application that combines AI-powered receipt processing, email integration, and Telegram bot automation to provide seamless expense tracking for Singapore users.
 
 ## 🌟 Key Features

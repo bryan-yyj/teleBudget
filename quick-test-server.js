@@ -1,9 +1,10 @@
 const TelegramBot = require('node-telegram-bot-api');
+require('dotenv').config();
 
-// Hardcode the token for testing
-const BOT_TOKEN = '8493139780:AAFIKXgSz52zkIIsE_hkllTO1RBmkBvt5k4';
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+if (!BOT_TOKEN) throw new Error('Set TELEGRAM_BOT_TOKEN in .env first.');
 
-console.log('🤖 Testing Telegram bot with hardcoded token...');
+console.log('🤖 Testing Telegram bot...');
 
 try {
   const bot = new TelegramBot(BOT_TOKEN, { polling: true });

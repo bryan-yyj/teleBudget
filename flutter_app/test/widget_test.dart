@@ -10,6 +10,6 @@ void main() {
     expect(find.text('TeleBudget'), findsOneWidget);
 
     // Verify that the total spent section exists
-    expect(find.text('Total Spent'), findsOneWidget);
+    expect(find.text('Total Spent (SGD)'), findsOneWidget);
   });
 }

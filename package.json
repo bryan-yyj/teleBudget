@@ -8,28 +8,39 @@
     "dev": "nodemon server.js",
     "test": "jest",
     "lint": "eslint .",
-    "typecheck": "echo 'No TypeScript to check'"
+    "typecheck": "echo 'No TypeScript to check'",
+    "cf:pages:dev": "wrangler pages dev public --cwd cloudflare/pages",
+    "cf:pages:deploy": "wrangler pages deploy public --cwd cloudflare/pages --project-name telebudget --branch main",
+    "cf:worker:deploy": "wrangler deploy --config cloudflare/worker/wrangler.jsonc",
+    "cf:db:migrate": "wrangler d1 migrations apply telebudget-db --remote --config cloudflare/worker/wrangler.jsonc"
   },
   "dependencies": {
-    "express": "^4.18.2",
-    "sqlite3": "^5.1.6",
-    "dotenv": "^16.3.1",
+    "axios": "^1.5.0",
     "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
     "helmet": "^7.0.0",
+    "joi": "^17.10.2",
+    "moment-timezone": "^0.5.43",
     "morgan": "^1.10.0",
     "multer": "^1.4.5-lts.1",
-    "axios": "^1.5.0",
     "node-telegram-bot-api": "^0.61.0",
     "socket.io": "^4.7.2",
-    "moment-timezone": "^0.5.43",
-    "joi": "^17.10.2"
+    "sqlite3": "^5.1.6"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1",
+    "eslint": "^8.50.0",
     "jest": "^29.7.0",
-    "eslint": "^8.50.0"
+    "nodemon": "^3.0.1",
+    "wrangler": "^4.138.0"
   },
-  "keywords": ["budget", "telegram", "email", "receipt", "tracking"],
+  "keywords": [
+    "budget",
+    "telegram",
+    "email",
+    "receipt",
+    "tracking"
+  ],
   "author": "teleBudget",
   "license": "MIT"
 }

@@ -1,5 +1,7 @@
 # TeleBudget Flutter App
 
+The app reads transactions from `https://telebudget.pages.dev`. In Telegram, send `/link`, then enter the eight-digit code using the link icon in the app. The token is stored with `flutter_secure_storage`. Receipt images are not retained. This repository contains Flutter source but no generated Android/iOS platform directories; generate them with Flutter tooling before building a device app.
+
 A clean, modern Flutter app for tracking your budget transactions from the TeleBudget backend.
 
 ## Features

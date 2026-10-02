@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'dart:convert';
 
 void main() {
@@ -38,23 +39,27 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static const _secureStorage = FlutterSecureStorage();
   List<Transaction> transactions = [];
   bool isLoading = true;
   String? error;
-  String backendUrl = 'http://localhost:3000';
+  String backendUrl = 'https://telebudget.pages.dev';
+  String? appToken;
 
   @override
   void initState() {
     super.initState();
-    _loadSettings();
-    _loadTransactions();
+    _initialize();
   }
 
-  Future<void> _loadSettings() async {
+  Future<void> _initialize() async {
     final prefs = await SharedPreferences.getInstance();
+    final token = await _secureStorage.read(key: 'app_token');
     setState(() {
-      backendUrl = prefs.getString('backend_url') ?? 'http://localhost:3000';
+      backendUrl = prefs.getString('backend_url') ?? 'https://telebudget.pages.dev';
+      appToken = token;
     });
+    await _loadTransactions();
   }
 
   Future<void> _saveBackendUrl(String url) async {
@@ -66,6 +71,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadTransactions() async {
+    if (appToken == null) {
+      setState(() {
+        isLoading = false;
+        transactions = [];
+        error = 'Open the Telegram bot, send /link, then enter its code here.';
+      });
+      return;
+    }
     setState(() {
       isLoading = true;
       error = null;
@@ -74,9 +87,9 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       // Try to connect to backend
       final response = await http.get(
-        Uri.parse('$backendUrl/api/transactions/user/1'),
-        headers: {'Content-Type': 'application/json'},
-      ).timeout(const Duration(seconds: 5));
+        Uri.parse('$backendUrl/api/transactions'),
+        headers: {'Authorization': 'Bearer $appToken'},
+      ).timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
@@ -89,48 +102,62 @@ class _HomeScreenState extends State<HomeScreen> {
           isLoading = false;
         });
       } else {
+        if (response.statusCode == 401) {
+          await _secureStorage.delete(key: 'app_token');
+          appToken = null;
+          throw Exception('App link expired. Send /link to the Telegram bot again.');
+        }
         throw Exception('Server returned ${response.statusCode}');
       }
     } catch (e) {
-      // Fall back to mock data
       setState(() {
-        transactions = _getMockTransactions();
-        error = 'Using offline mode: ${e.toString()}';
+        transactions = [];
+        error = e.toString();
         isLoading = false;
       });
     }
   }
 
-  List<Transaction> _getMockTransactions() {
-    return [
-      Transaction(
-        id: 1,
-        amount: 15.50,
-        description: 'Coffee at Starbucks',
-        category: 'Food & Dining',
-        date: DateTime.now().subtract(const Duration(hours: 2)),
-        merchant: 'Starbucks',
-        source: 'manual',
+  Future<void> _pair(String code) async {
+    final response = await http.post(
+      Uri.parse('$backendUrl/api/pair'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'code': code}),
+    ).timeout(const Duration(seconds: 15));
+    if (response.statusCode != 200) {
+      throw Exception(jsonDecode(response.body)['error'] ?? 'Could not link app');
+    }
+    final token = jsonDecode(response.body)['token'] as String;
+    await _secureStorage.write(key: 'app_token', value: token);
+    setState(() => appToken = token);
+    await _loadTransactions();
+  }
+
+  void _showPairDialog() {
+    final controller = TextEditingController();
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Connect Telegram'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          maxLength: 8,
+          decoration: const InputDecoration(labelText: 'Code from /link', border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+          FilledButton(onPressed: () async {
+            try {
+              await _pair(controller.text.trim());
+              if (context.mounted) Navigator.pop(context);
+            } catch (e) {
+              if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString())));
+            }
+          }, child: const Text('Connect')),
+        ],
       ),
-      Transaction(
-        id: 2,
-        amount: 45.00,
-        description: 'Grocery shopping',
-        category: 'Food & Dining',
-        date: DateTime.now().subtract(const Duration(days: 1)),
-        merchant: 'FairPrice',
-        source: 'receipt',
-      ),
-      Transaction(
-        id: 3,
-        amount: 8.50,
-        description: 'Bus fare',
-        category: 'Transportation',
-        date: DateTime.now().subtract(const Duration(days: 2)),
-        merchant: 'SBS Transit',
-        source: 'telegram',
-      ),
-    ];
+    );
   }
 
   void _showSettingsDialog() {
@@ -147,13 +174,13 @@ class _HomeScreenState extends State<HomeScreen> {
               controller: controller,
               decoration: const InputDecoration(
                 labelText: 'Backend URL',
-                hintText: 'http://192.168.1.100:3000',
+                hintText: 'https://telebudget.pages.dev',
                 border: OutlineInputBorder(),
               ),
             ),
             const SizedBox(height: 16),
             const Text(
-              'Enter your computer\'s IP address if using a phone',
+              'Use the Cloudflare Pages URL for your backend',
               style: TextStyle(fontSize: 12),
             ),
           ],
@@ -180,7 +207,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final totalSpent = transactions.fold<double>(
       0,
-      (sum, transaction) => sum + transaction.amount,
+      (sum, transaction) => sum + (transaction.currency == 'SGD' ? transaction.amount : 0),
     );
 
     return Scaffold(
@@ -188,6 +215,11 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('TeleBudget'),
         centerTitle: true,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.link),
+            tooltip: 'Connect Telegram',
+            onPressed: _showPairDialog,
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             onPressed: _showSettingsDialog,
@@ -217,7 +249,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const Text(
-                        'Total Spent',
+                        'Total Spent (SGD)',
                         style: TextStyle(
                           color: Colors.white70,
                           fontSize: 14,
@@ -296,7 +328,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             ),
                             SizedBox(height: 8),
                             Text(
-                              'Send a receipt to your Telegram bot!',
+                              'Send an expense to your Telegram bot!',
                               style: TextStyle(color: Colors.grey),
                             ),
                           ],
@@ -332,6 +364,7 @@ class _HomeScreenState extends State<HomeScreen> {
 class Transaction {
   final int id;
   final double amount;
+  final String currency;
   final String description;
   final String category;
   final DateTime date;
@@ -341,6 +374,7 @@ class Transaction {
   Transaction({
     required this.id,
     required this.amount,
+    required this.currency,
     required this.description,
     required this.category,
     required this.date,
@@ -352,6 +386,7 @@ class Transaction {
     return Transaction(
       id: json['id'] as int,
       amount: (json['amount'] as num).toDouble(),
+      currency: json['currency'] as String? ?? 'SGD',
       description: json['description'] as String,
       category: json['category'] as String,
       date: DateTime.parse(json['transactionDate'] as String),
@@ -401,7 +436,7 @@ class TransactionCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
             Text(
-              '-\$${transaction.amount.toStringAsFixed(2)}',
+              '-${transaction.currency} ${transaction.amount.toStringAsFixed(2)}',
               style: const TextStyle(
                 fontWeight: FontWeight.bold,
                 fontSize: 16,
