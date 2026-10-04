@@ -13,4 +13,24 @@ The Cloudflare account already has the `telebudget` Pages project, `telebudget-d
 
 The bot automatically saves entries only when validated confidence is greater than 0.60. If it is lower, the bot asks for confirmation or a corrected message. On Workers AI quota or service failure, it does not save an expense.
 
-For local Pages development, run `npm run cf:pages:dev`. Run `node --test cloudflare/test/*.test.js` for extraction checks. Wrangler's local AI binding still calls Cloudflare and uses the daily allocation.
+For local Pages development, run `npm run cf:pages:dev`. Run `npm run test:cloudflare` on Node 22.12+ for extraction and analytics checks (including real SQLite queries, with no AI or Telegram calls). Wrangler's local AI binding still calls Cloudflare and uses the daily allocation.
+
+## Telegram spending analytics
+
+Send `/stats` for this month to date, `/stats week` for Monday through now,
+`/stats lastmonth` for the previous full month, or `/stats 2026-09` for a specific
+month. Period buttons make switching easy; tap a category to see its merchants
+and largest purchases, then Back to overview to return.
+
+Reports include totals, expense counts, average expense, recorded spending per
+calendar day, category amounts and shares, top merchants, largest purchases,
+and payment method totals. Each currency has its own report, without conversion.
+Dates use Singapore time. Current periods compare against the matching date and
+time in the preceding month/week; completed months compare against the full
+preceding month. Both ranges are shown. Only saved expenses count, so unconfirmed
+entries are excluded and missing history is not treated as evidence of savings.
+
+Categories use the labels saved with each expense. Use `/recent` and Edit to
+correct a merchant, category or amount. See [the design and calculation rules](ANALYTICS.md)
+for details. Deploy the updated Queue consumer to enable this feature in the live
+bot; no database migration is needed.

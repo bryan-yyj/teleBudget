@@ -1,4 +1,5 @@
 import { extractExpense, bytesToBase64, sha256 } from '../shared/core.js';
+import { resolveStatsPeriod, parseStatsCallback, loadStats, formatStats, statsKeyboard, STATS_USAGE } from '../shared/analytics.js';
 
 const api = (env, method) => `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
 
@@ -8,6 +9,15 @@ async function telegram(env, method, payload) {
   const data = await response.json();
   if (!data.ok) throw new Error(`Telegram ${method}: ${response.status}`);
   return data.result;
+}
+
+async function sendStats(env, chatId, userId, period, category = null, now = new Date()) {
+  const data = await loadStats(env.DB, userId, period, category);
+  const messages = formatStats(data, period, category);
+  for (let index = 0; index < messages.length; index++) {
+    await telegram(env, 'sendMessage', { chat_id: chatId, text: messages[index],
+      ...(index === messages.length - 1 ? { reply_markup: statsKeyboard(period, data, category, now) } : {}) });
+  }
 }
 
 function buttons(id) {
@@ -71,7 +81,7 @@ async function processText(env, message, user, updateId) {
   const command = text.split(/\s/)[0].toLowerCase().split('@')[0];
   if (command === '/start' || command === '/help') {
     await telegram(env, 'sendMessage', { chat_id: chatId,
-      text: 'Send an expense like “6.50 at macs” or a receipt photo. I save clear entries and ask when details are uncertain. Use /recent, /stats, /link, or /cancel.' });
+      text: 'Send an expense like “6.50 at macs” or a receipt photo. I save clear entries and ask when details are uncertain.\n\n/recent — recent expenses, Edit and Undo\n/stats — this month’s spending, categories and merchants\n/stats week — this week\n/stats lastmonth — last month\n/stats YYYY-MM — a specific month\nTap a category in a stats report for more detail.\n/link — connect the app\n/unlink — revoke app sessions\n/cancel — cancel a pending entry' });
     return;
   }
   if (command === '/cancel') {
@@ -90,10 +100,13 @@ async function processText(env, message, user, updateId) {
     return;
   }
   if (command === '/stats') {
-    const month = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 7);
-    const stats = await env.DB.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(amount),0) AS total
-      FROM transactions WHERE user_id=? AND currency='SGD' AND strftime('%Y-%m', transaction_date, '+8 hours')=?`).bind(user.id, month).first();
-    await telegram(env, 'sendMessage', { chat_id: chatId, text: `${month}: ${stats.count} expenses, SGD ${stats.total.toFixed(2)}` });
+    const now = new Date();
+    const period = resolveStatsPeriod(text.split(/\s+/).slice(1).join(' '), now);
+    if (!period) {
+      await telegram(env, 'sendMessage', { chat_id: chatId, text: STATS_USAGE });
+      return;
+    }
+    await sendStats(env, chatId, user.id, period, null, now);
     return;
   }
   if (command === '/link') {
@@ -184,6 +197,16 @@ async function processCallback(env, query, user) {
   const chatId = query.message.chat.id;
   const data = query.data || '';
   await telegram(env, 'answerCallbackQuery', { callback_query_id: query.id });
+  if (data.startsWith('stats:')) {
+    const now = new Date();
+    const selection = parseStatsCallback(data, now);
+    if (!selection) {
+      await telegram(env, 'sendMessage', { chat_id: chatId, text: STATS_USAGE });
+      return;
+    }
+    await sendStats(env, chatId, user.id, selection.period, selection.category, now);
+    return;
+  }
   if (data === 'cancel') {
     await clearPending(env, user.id);
     await telegram(env, 'sendMessage', { chat_id: chatId, text: 'Cancelled; nothing was saved.' });
