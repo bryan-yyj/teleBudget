@@ -18,6 +18,13 @@ exchange rates, savings or forecasts: the current data cannot support them.
 - `/stats week`: Monday through now.
 - `/stats lastmonth`: the completed previous calendar month.
 - `/stats YYYY-MM`: a completed month, or month to date for the current month.
+- `/categories` accepts the same period arguments and shows all eight categories
+  with amounts, shares and counts, including zero-spending categories. Currency
+  totals come from the category aggregates. Empty reports show zero entries in
+  the bot's default SGD currency. The overview needs one aggregate query.
+- Category-view period and detail buttons retain that view, with Back to categories
+  returning to the selected period. `/help` and `/start` explain expense examples,
+  receipts, confirmation, edits, undo, reports and app linking.
 - Inline buttons select periods and drill into a saved category. A category
   report shows its share of all spending in each currency, merchants, payment
   methods and largest purchases. Back returns to that period's overview.
@@ -29,7 +36,8 @@ exchange rates, savings or forecasts: the current data cannot support them.
   show only the top entries include a remainder. Currency reports stay separate.
 - Invalid or future periods show usage. Empty periods say no expenses were
   recorded; a prior baseline may still be shown. Categories use saved labels,
-  which users can correct through `/recent` and Edit.
+  which users can correct using Edit on the original saved expense message.
+  `/recent` lists the latest 10 expenses, ordered by expense date.
 
 ## Meaning and calculation rules
 

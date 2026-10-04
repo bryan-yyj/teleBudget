@@ -3,6 +3,7 @@ import { CATEGORIES } from './core.js';
 const DAY = 86400000;
 const SGT = 8 * 3600000;
 export const STATS_USAGE = 'Use /stats (this month), /stats week, /stats month, /stats lastmonth, or /stats YYYY-MM, for example /stats 2026-09. Future months are not available.';
+export const CATEGORIES_USAGE = STATS_USAGE.replaceAll('/stats', '/categories');
 
 const monthKey = local => new Date(local).toISOString().slice(0, 7);
 const utc = local => new Date(local - SGT).toISOString();
@@ -54,10 +55,10 @@ export function resolveStatsPeriod(input = 'month', now = new Date()) {
 }
 
 export function parseStatsCallback(data, now = new Date()) {
-  const match = data.match(/^stats:(week|\d{4}-\d{2})(?::([0-7]))?$/);
+  const match = data.match(/^(stats|categories):(week|\d{4}-\d{2})(?::([0-7]))?$/);
   if (!match) return null;
-  const period = resolveStatsPeriod(match[1], now);
-  return period ? { period, category: match[2] === undefined ? null : CATEGORIES[Number(match[2])] } : null;
+  const period = resolveStatsPeriod(match[2], now);
+  return period ? { view: match[1], period, category: match[3] === undefined ? null : CATEGORIES[Number(match[3])] } : null;
 }
 
 // Bound by user + UTC dates, so D1 can use idx_transactions_user_date.
@@ -65,17 +66,26 @@ const FILTER = 'user_id=? AND transaction_date>=? AND transaction_date<?';
 const CENTS = 'CAST(ROUND(amount * 100) AS INTEGER)';
 const CATEGORY = `CASE WHEN category IN (${CATEGORIES.map(() => '?').join(',')}) THEN category ELSE 'Others' END`;
 
+function categoryStatement(db, userId, window, index = 0) {
+  return db.prepare(`SELECT ${index} AS period, currency,
+    ${CATEGORY} AS label, COUNT(*) AS count, SUM(${CENTS}) AS total,
+    COUNT(DISTINCT date(transaction_date, '+8 hours')) AS active_days
+    FROM transactions WHERE ${FILTER} GROUP BY currency, label ORDER BY currency, total DESC, label`)
+    .bind(...CATEGORIES, userId, window.start, window.end);
+}
+
+export async function loadCategories(db, userId, period) {
+  const { results } = await categoryStatement(db, userId, period.current).all();
+  return { categories: results };
+}
+
 export async function loadStats(db, userId, period, category = null) {
   const periods = [period.current, period.previous];
   const totals = periods.map((window, index) => db.prepare(`SELECT ${index} AS period, currency,
     COUNT(*) AS count, SUM(${CENTS}) AS total,
     COUNT(DISTINCT date(transaction_date, '+8 hours')) AS active_days
     FROM transactions WHERE ${FILTER} GROUP BY currency`).bind(userId, window.start, window.end));
-  const categories = periods.map((window, index) => db.prepare(`SELECT ${index} AS period, currency,
-    ${CATEGORY} AS label, COUNT(*) AS count, SUM(${CENTS}) AS total,
-    COUNT(DISTINCT date(transaction_date, '+8 hours')) AS active_days
-    FROM transactions WHERE ${FILTER} GROUP BY currency, label ORDER BY currency, total DESC, label`)
-    .bind(...CATEGORIES, userId, window.start, window.end));
+  const categories = periods.map((window, index) => categoryStatement(db, userId, window, index));
   const selectedFilter = `${FILTER}${category ? ` AND ${CATEGORY}=?` : ''}`;
   const args = [userId, period.current.start, period.current.end, ...(category ? [...CATEGORIES, category] : [])];
   function groups(field, limit) {
@@ -106,6 +116,10 @@ export async function loadStats(db, userId, period, category = null) {
 const money = (currency, cents) => `${currency} ${(cents / 100).toLocaleString('en-SG', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const share = (part, total) => total > 0 ? `${(part / total * 100).toFixed(1)}%` : '0.0%';
 const expenses = count => `${count} ${count === 1 ? 'expense' : 'expenses'}`;
+const currenciesOf = rows => [...new Set(rows.map(row => row.currency))]
+  .sort((a, b) => a === b ? 0 : a === 'SGD' ? -1 : b === 'SGD' ? 1 : a.localeCompare(b));
+const asOfLine = period => `As of ${new Date(Date.parse(period.asOf) + SGT).toISOString().slice(0, 16).replace('T', ' ')} SGT; today is partial.`;
+const REPORT_FOOTER = 'Recorded expenses only; unconfirmed entries excluded. Currencies are separate, with no conversion. Categories follow saved labels; tap Edit on an expense’s saved message to correct it.';
 // Plain text with one physical line per label; preserve literal punctuation safely.
 const label = (value, max = 64) => {
   const clean = String(value || '').replace(/[\s\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g, ' ').trim();
@@ -144,19 +158,44 @@ function groupLines(rows, currency, total, count, unknownLabel, remainderLabel) 
   return lines;
 }
 
+export function formatCategories(data, period) {
+  const currencies = currenciesOf(data.categories);
+  const empty = !currencies.length;
+  // The empty report lists the supported categories in the bot's default currency.
+  if (empty) currencies.push('SGD');
+  return currencies.flatMap(currency => {
+    const recorded = data.categories.filter(row => row.currency === currency && row.period === 0);
+    const total = recorded.reduce((sum, row) => sum + row.total, 0);
+    const count = recorded.reduce((sum, row) => sum + row.count, 0);
+    const rows = CATEGORIES.map(name => recorded.find(row => row.label === name)
+      || { label: name, total: 0, count: 0 })
+      .sort((a, b) => b.total - a.total || CATEGORIES.indexOf(a.label) - CATEGORIES.indexOf(b.label));
+    return splitStatsMessage([
+      `Category spending · ${period.title}`, `Period (SGT): ${period.current.label}`,
+      ...(period.partial ? [asOfLine(period)] : []), '',
+      `${currency}${empty ? ' · default currency' : ''}`,
+      `Recorded total: ${money(currency, total)} · ${expenses(count)}`,
+      ...(empty ? ['No expenses recorded in this period. Send “6.50 at macs” to start.'] : []), '',
+      ...rows.map(row => `${row.label}: ${money(currency, row.total)} · ${share(row.total, total)} · ${expenses(row.count)}`),
+      '', 'Percentages show each category’s share of recorded spending in this currency.',
+      REPORT_FOOTER, '', 'Choose a period below, or tap a category with recorded spending for merchants and purchases.'
+    ].join('\n'));
+  });
+}
+
 export function formatStats(data, period, category = null) {
   const header = [`Spending stats · ${period.title}${category ? ` · ${category}` : ''}`,
     `Period (SGT): ${period.current.label}`,
-    ...(period.partial ? [`As of ${new Date(Date.parse(period.asOf) + SGT).toISOString().slice(0, 16).replace('T', ' ')} SGT; today is partial.`] : []),
+    ...(period.partial ? [asOfLine(period)] : []),
     `Compare with (SGT): ${period.previous.label}`];
   if (period.partial) header.push(period.key === 'week'
     ? 'Comparison covers the same weekdays and local time last week.'
     : 'Comparison stops at the matching local time, capped at the previous month’s end.');
   if (period.current.days !== period.previous.days) header.push('Calendar lengths differ; the totals cover different numbers of days.');
   const source = category ? data.categories.filter(row => row.label === category) : data.totals;
-  const currencies = [...new Set(source.map(row => row.currency))].sort((a, b) => a === b ? 0 : a === 'SGD' ? -1 : b === 'SGD' ? 1 : a.localeCompare(b));
+  const currencies = currenciesOf(source);
   const reports = [];
-  const footer = 'Recorded expenses only; unconfirmed entries excluded. Currencies are separate, with no conversion. Categories follow saved labels; use /recent → Edit to correct an entry.';
+  const footer = REPORT_FOOTER;
   if (!currencies.length) reports.push([...header, '', `No ${category ? `${category} ` : ''}expenses recorded in this period or its comparison period.`,
     'Send an expense such as “6.50 at macs”, or choose another period.', '', footer].join('\n'));
   for (const currency of currencies) {
@@ -192,7 +231,7 @@ export function formatStats(data, period, category = null) {
       }
       lines.push('', 'Payment methods · top 3 recorded labels', ...groupLines(data.payments, currency, total, count, 'Payment method not recorded', 'Other payment methods'));
     }
-    lines.push('', footer, '', category ? 'Tap Back to overview to see all categories.' : 'Tap a category below for its merchants and purchases.');
+    lines.push('', footer, '', category ? 'Use the Back button to see all categories.' : 'Tap a category below for its merchants and purchases.');
     reports.push(lines.join('\n'));
   }
   return reports.flatMap(report => splitStatsMessage(report));
@@ -217,17 +256,17 @@ export function splitStatsMessage(text, limit = 3900) {
   return chunks;
 }
 
-export function statsKeyboard(period, data, category = null, now = new Date()) {
+export function statsKeyboard(period, data, category = null, now = new Date(), view = 'stats') {
   const rows = [[
-    { text: 'This month', callback_data: `stats:${resolveStatsPeriod('month', now).key}` },
-    { text: 'This week', callback_data: 'stats:week' },
-    { text: 'Last month', callback_data: `stats:${resolveStatsPeriod('lastmonth', now).key}` }
+    { text: 'This month', callback_data: `${view}:${resolveStatsPeriod('month', now).key}` },
+    { text: 'This week', callback_data: `${view}:week` },
+    { text: 'Last month', callback_data: `${view}:${resolveStatsPeriod('lastmonth', now).key}` }
   ]];
-  if (category) rows.push([{ text: 'Back to overview', callback_data: `stats:${period.key}` }]);
+  if (category) rows.push([{ text: view === 'categories' ? 'Back to categories' : 'Back to overview', callback_data: `${view}:${period.key}` }]);
   else {
     const present = new Set(data.categories.map(row => row.label));
     const buttons = CATEGORIES.filter(name => present.has(name)).map(name => ({ text: name,
-      callback_data: `stats:${period.key}:${CATEGORIES.indexOf(name)}` }));
+      callback_data: `${view}:${period.key}:${CATEGORIES.indexOf(name)}` }));
     for (let index = 0; index < buttons.length; index += 2) rows.push(buttons.slice(index, index + 2));
   }
   return { inline_keyboard: rows };

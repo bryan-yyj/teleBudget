@@ -22,6 +22,16 @@ Send `/stats` for this month to date, `/stats week` for Monday through now,
 month. Period buttons make switching easy; tap a category to see its merchants
 and largest purchases, then Back to overview to return.
 
+Send `/categories` for a focused category breakdown: every category's amount,
+share of that currency's spending, and expense count, including categories with
+zero recorded spending. It supports `/categories week`, `/categories month`,
+`/categories lastmonth`, and `/categories YYYY-MM`. Its buttons stay in the
+category view; tap a category with spending for detail, then Back to categories.
+The overview uses one aggregate query and does not fetch merchants or purchases.
+
+`/help` and `/start` provide a full guide to recording text expenses and receipts,
+confirmation, cancellation, editing, undo, report periods, and app pairing.
+
 Reports include totals, expense counts, average expense, recorded spending per
 calendar day, category amounts and shares, top merchants, largest purchases,
 and payment method totals. Each currency has its own report, without conversion.
@@ -30,7 +40,9 @@ time in the preceding month/week; completed months compare against the full
 preceding month. Both ranges are shown. Only saved expenses count, so unconfirmed
 entries are excluded and missing history is not treated as evidence of savings.
 
-Categories use the labels saved with each expense. Use `/recent` and Edit to
-correct a merchant, category or amount. See [the design and calculation rules](ANALYTICS.md)
+Categories use the labels saved with each expense. Tap Edit on its original
+saved message to correct a merchant, category or amount; include its original
+date when it should stay the same. `/recent` lists the latest 10 expenses.
+See [the design and calculation rules](ANALYTICS.md)
 for details. Deploy the updated Queue consumer to enable this feature in the live
 bot; no database migration is needed.

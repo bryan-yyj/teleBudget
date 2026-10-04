@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import worker from '../worker/index.js';
 import { CATEGORIES } from '../shared/core.js';
 import { resolveStatsPeriod, parseStatsCallback, loadStats, formatStats, statsKeyboard,
-  splitStatsMessage, STATS_USAGE } from '../shared/analytics.js';
+  loadCategories, formatCategories, splitStatsMessage, STATS_USAGE, CATEGORIES_USAGE } from '../shared/analytics.js';
 
 const NOW = new Date('2026-10-05T04:00:00.000Z'); // Monday, noon SGT
 
@@ -328,4 +328,90 @@ test('confirmation, edits and undo are reflected immediately; pending entries ar
   assert.match((await dispatch(t, db, `/stats ${period.key}`))[0].text, /SGD 60\.00 · 2 expenses/);
   await dispatch(t, db, { data: `undo:${id}` });
   assert.match((await dispatch(t, db, `/stats ${period.key}`))[0].text, /SGD 20\.00 · 1 expense/);
+});
+
+test('category overview totals and shares match stats, with all categories and separate currencies', async t => {
+  const db = fixture(t);
+  const period = resolveStatsPeriod('month', NOW);
+  const data = await loadCategories(db, 1, period);
+  const reports = formatCategories(data, period);
+  assert.equal(reports.length, 2); // prior-only EUR is outside the selected period
+  assert.match(reports[0], /Recorded total: SGD 143\.00 · 6 expenses/);
+  assert.match(reports[0], /Shopping: SGD 100\.00 · 69\.9% · 1 expense/);
+  assert.match(reports[0], /Food & Dining: SGD 32\.00 · 22\.4% · 3 expenses/);
+  assert.match(reports[0], /Education: SGD 0\.00 · 0\.0% · 0 expenses/);
+  assert.match(reports[1], /Recorded total: USD 50\.00 · 1 expense/);
+  for (const report of reports) {
+    for (const category of CATEGORIES) assert.ok(report.includes(`${category}: `));
+    assert.ok(report.length <= 3900);
+  }
+  assert.doesNotMatch(reports.join('\n'), /EUR|99,999|88,888|NaN|Infinity/);
+  const sgd = data.categories.filter(row => row.currency === 'SGD');
+  assert.equal(sgd.reduce((sum, row) => sum + row.total, 0), 14300);
+});
+
+test('empty category periods list zero spending in all supported categories', async t => {
+  const db = new TestDatabase(t);
+  const period = resolveStatsPeriod('month', NOW);
+  const report = formatCategories(await loadCategories(db, 1, period), period)[0];
+  assert.match(report, /No expenses recorded in this period/);
+  assert.match(report, /SGD · default currency/);
+  for (const category of CATEGORIES) assert.ok(report.includes(`${category}: SGD 0.00 · 0.0% · 0 expenses`));
+  assert.doesNotMatch(report, /NaN|Infinity/);
+});
+
+test('queued categories report, detail and Back retain the category view and user isolation', async t => {
+  const db = new TestDatabase(t);
+  const period = resolveStatsPeriod('lastmonth');
+  insert(db, { amount: 13.35, transaction_date: period.current.start });
+  db.sqlite.prepare('INSERT INTO pending_entries(user_id,payload) VALUES (?,?)').run(1, '{"amount":200}');
+  const sent = await dispatch(t, db, `/categories@TeleBudgetBot ${period.key}`);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0].text, /Food & Dining: SGD 13\.35 · 100\.0% · 1 expense/);
+  assert.doesNotMatch(sent[0].text, /Top merchants|Largest purchases/);
+  const buttons = sent[0].reply_markup.inline_keyboard.flat();
+  assert.ok(buttons.every(button => button.callback_data.startsWith('categories:')));
+  assert.ok(buttons.every(button => Buffer.byteLength(button.callback_data) <= 64));
+  const detail = await dispatch(t, db, { data: buttons.find(button => button.text === 'Food & Dining').callback_data });
+  assert.equal(detail[0].method, 'answerCallbackQuery');
+  assert.match(detail[1].text, /Share of all SGD spending: 100\.0%/);
+  const back = detail[1].reply_markup.inline_keyboard.flat().find(button => button.text === 'Back to categories');
+  assert.equal(back.callback_data, `categories:${period.key}`);
+  assert.match((await dispatch(t, db, { data: back.callback_data }))[1].text, /Category spending/);
+  const otherUser = await dispatch(t, db, { data: back.callback_data }, 202);
+  assert.doesNotMatch(otherUser[1].text, /13\.35/);
+  assert.equal(db.sqlite.prepare('SELECT payload FROM pending_entries WHERE user_id=1').get().payload, '{"amount":200}');
+});
+
+test('categories shortcuts, period buttons and invalid arguments route without AI', async t => {
+  const db = new TestDatabase(t);
+  for (const command of ['/categories', '/categories month', '/categories week', '/categories lastmonth']) {
+    const sent = await dispatch(t, db, command);
+    assert.match(sent[0].text, /Category spending/);
+    const periods = sent[0].reply_markup.inline_keyboard[0];
+    assert.equal(periods.length, 3);
+    for (const button of periods) {
+      assert.match((await dispatch(t, db, { data: button.callback_data }))[1].text, /Category spending/);
+    }
+  }
+  for (const command of ['/categories all', '/categories 9999-12', '/categories month extra']) {
+    assert.equal((await dispatch(t, db, command))[0].text, CATEGORIES_USAGE);
+  }
+  for (const data of ['categories:2026-13:0', 'categories:week:8', 'categories:week:0:1']) {
+    assert.equal((await dispatch(t, db, { data }))[1].text, CATEGORIES_USAGE);
+  }
+});
+
+test('help and start explain every command and supported workflow within one Telegram message', async t => {
+  const db = new TestDatabase(t);
+  const help = (await dispatch(t, db, '/help'))[0].text;
+  for (const command of ['/add', '/recent', '/stats', '/categories', '/link', '/unlink', '/start', '/help', '/cancel']) {
+    assert.ok(help.includes(command), command);
+  }
+  for (const detail of ['6.50 at macs', 'Confirm', 'Edit', 'Undo', '30 minutes', '10 minutes',
+    'YYYY-MM', 'Monday through now', 'Singapore time', 'separately', 'original date']) {
+    assert.ok(help.includes(detail), detail);
+  }
+  assert.ok(help.length <= 4096, `Help length: ${help.length}`);
+  assert.equal((await dispatch(t, db, '/start'))[0].text, help);
 });

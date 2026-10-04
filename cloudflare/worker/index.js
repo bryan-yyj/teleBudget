@@ -1,7 +1,48 @@
-import { extractExpense, bytesToBase64, sha256 } from '../shared/core.js';
-import { resolveStatsPeriod, parseStatsCallback, loadStats, formatStats, statsKeyboard, STATS_USAGE } from '../shared/analytics.js';
+import { extractExpense, bytesToBase64, sha256, CATEGORIES } from '../shared/core.js';
+import { resolveStatsPeriod, parseStatsCallback, loadStats, loadCategories, formatStats, formatCategories,
+  statsKeyboard, STATS_USAGE, CATEGORIES_USAGE } from '../shared/analytics.js';
 
 const api = (env, method) => `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
+
+const HELP_TEXT = `TeleBudget — track expenses in this private chat
+
+Record an expense
+Send one expense per message, with an amount and merchant or description. For example:
+• 6.50 at macs
+• 12.80 at NTUC paid with PayNow
+• USD 15 at a cafe
+• 8.50 at a cafe yesterday
+SGD is the default currency. State another currency or date when needed. You can send text directly; /add shows a starter example.
+
+Receipts and confirmation
+Send a clear receipt photo or a JPG, PNG or WebP image smaller than 10 MB. I read the receipt total and merchant. Receipt images are not kept.
+Clear expenses are saved automatically. If I ask you to check an expense, tap Confirm to save it, or send a complete corrected expense. Tap Cancel or use /cancel to stop. Finish a pending confirmation or edit within 30 minutes.
+
+Review and correct
+/recent — see your latest 10 saved expenses, ordered by expense date.
+On the original “Saved #…” message, tap Edit and send the complete replacement expense. Include its original date if that date should stay the same. Tap Undo on that saved message to remove the expense. Use /cancel to abandon a pending edit; the saved expense stays.
+
+Spending reports
+/stats — this month’s totals, averages, categories, top merchants, largest purchases and payment methods, plus a previous-period comparison.
+/categories — the amount, percentage and expense count for every category this month, including categories with no recorded spending.
+
+Both commands support the same periods:
+/stats week or /categories week — Monday through now.
+/stats month or /categories month — this month to date (the default).
+/stats lastmonth or /categories lastmonth — the previous full month.
+/stats 2026-09 or /categories 2026-09 — a specific month, using YYYY-MM. Future months are unavailable.
+Use the period buttons to switch reports. Tap a category with recorded spending to see its merchants and purchases; use Back to return.
+
+Categories: ${CATEGORIES.join('; ')}.
+Reports use Singapore time and saved expense dates. Each currency is shown separately, with no conversion. Unconfirmed entries are excluded; missing entries do not prove lower real spending. Categories use the labels saved with each expense.
+
+Connect the app
+/link — get an 8-digit code to enter in the TeleBudget app. It expires in 10 minutes.
+/unlink — revoke all connected app sessions; your expenses stay saved.
+
+/start — show this getting-started guide.
+/help — show these instructions again.
+/cancel — cancel the current pending confirmation or edit.`;
 
 async function telegram(env, method, payload) {
   const response = await fetch(api(env, method), { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -11,12 +52,13 @@ async function telegram(env, method, payload) {
   return data.result;
 }
 
-async function sendStats(env, chatId, userId, period, category = null, now = new Date()) {
-  const data = await loadStats(env.DB, userId, period, category);
-  const messages = formatStats(data, period, category);
+async function sendAnalytics(env, chatId, userId, period, category = null, now = new Date(), view = 'stats') {
+  const categoryOverview = view === 'categories' && !category;
+  const data = categoryOverview ? await loadCategories(env.DB, userId, period) : await loadStats(env.DB, userId, period, category);
+  const messages = categoryOverview ? formatCategories(data, period) : formatStats(data, period, category);
   for (let index = 0; index < messages.length; index++) {
     await telegram(env, 'sendMessage', { chat_id: chatId, text: messages[index],
-      ...(index === messages.length - 1 ? { reply_markup: statsKeyboard(period, data, category, now) } : {}) });
+      ...(index === messages.length - 1 ? { reply_markup: statsKeyboard(period, data, category, now, view) } : {}) });
   }
 }
 
@@ -81,7 +123,7 @@ async function processText(env, message, user, updateId) {
   const command = text.split(/\s/)[0].toLowerCase().split('@')[0];
   if (command === '/start' || command === '/help') {
     await telegram(env, 'sendMessage', { chat_id: chatId,
-      text: 'Send an expense like “6.50 at macs” or a receipt photo. I save clear entries and ask when details are uncertain.\n\n/recent — recent expenses, Edit and Undo\n/stats — this month’s spending, categories and merchants\n/stats week — this week\n/stats lastmonth — last month\n/stats YYYY-MM — a specific month\nTap a category in a stats report for more detail.\n/link — connect the app\n/unlink — revoke app sessions\n/cancel — cancel a pending entry' });
+      text: HELP_TEXT });
     return;
   }
   if (command === '/cancel') {
@@ -99,14 +141,14 @@ async function processText(env, message, user, updateId) {
       text: results.length ? results.map(row => `#${row.id} ${summary(row)}`).join('\n\n') : 'No expenses yet. Send “6.50 at macs” to start.' });
     return;
   }
-  if (command === '/stats') {
+  if (command === '/stats' || command === '/categories') {
     const now = new Date();
     const period = resolveStatsPeriod(text.split(/\s+/).slice(1).join(' '), now);
     if (!period) {
-      await telegram(env, 'sendMessage', { chat_id: chatId, text: STATS_USAGE });
+      await telegram(env, 'sendMessage', { chat_id: chatId, text: command === '/categories' ? CATEGORIES_USAGE : STATS_USAGE });
       return;
     }
-    await sendStats(env, chatId, user.id, period, null, now);
+    await sendAnalytics(env, chatId, user.id, period, null, now, command.slice(1));
     return;
   }
   if (command === '/link') {
@@ -197,14 +239,14 @@ async function processCallback(env, query, user) {
   const chatId = query.message.chat.id;
   const data = query.data || '';
   await telegram(env, 'answerCallbackQuery', { callback_query_id: query.id });
-  if (data.startsWith('stats:')) {
+  if (data.startsWith('stats:') || data.startsWith('categories:')) {
     const now = new Date();
     const selection = parseStatsCallback(data, now);
     if (!selection) {
-      await telegram(env, 'sendMessage', { chat_id: chatId, text: STATS_USAGE });
+      await telegram(env, 'sendMessage', { chat_id: chatId, text: data.startsWith('categories:') ? CATEGORIES_USAGE : STATS_USAGE });
       return;
     }
-    await sendStats(env, chatId, user.id, selection.period, selection.category, now);
+    await sendAnalytics(env, chatId, user.id, selection.period, selection.category, now, selection.view);
     return;
   }
   if (data === 'cancel') {
