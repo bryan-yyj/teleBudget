@@ -1,76 +1,73 @@
-import { extractExpense, bytesToBase64, sha256, CATEGORIES } from '../shared/core.js';
+import { MEALS } from '../shared/meals.js';
+import { shortLabel } from '../shared/reports.js';
+import { extractExpense, bytesToBase64, sha256 } from '../shared/core.js';
 import { resolveStatsPeriod, parseStatsCallback, loadStats, loadCategories, formatStats, formatCategories,
   statsKeyboard, STATS_USAGE, CATEGORIES_USAGE } from '../shared/analytics.js';
 
 const api = (env, method) => `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`;
 
-const HELP_TEXT = `TeleBudget — track expenses in this private chat
+const HELP_TEXT = `Send an expense or receipt photo.
+“10.50 at Subway for lunch”
 
-Record an expense
-Send one expense per message, with an amount and merchant or description. For example:
-• 6.50 at macs
-• 12.80 at NTUC paid with PayNow
-• USD 15 at a cafe
-• 8.50 at a cafe yesterday
-SGD is the default currency. State another currency or date when needed. You can send text directly; /add shows a starter example.
-
-Receipts and confirmation
-Send a clear receipt photo or a JPG, PNG or WebP image smaller than 10 MB. I read the receipt total and merchant. Receipt images are not kept.
-Clear expenses are saved automatically. If I ask you to check an expense, tap Confirm to save it, or send a complete corrected expense. Tap Cancel or use /cancel to stop. Finish a pending confirmation or edit within 30 minutes.
-
-Review and correct
-/recent — see your latest 10 saved expenses, ordered by expense date.
-On the original “Saved #…” message, tap Edit and send the complete replacement expense. Include its original date if that date should stay the same. Tap Undo on that saved message to remove the expense. Use /cancel to abandon a pending edit; the saved expense stays.
-
-Spending reports
-/stats — this month’s totals, averages, categories, top merchants, largest purchases and payment methods, plus a previous-period comparison.
-/categories — the amount, percentage and expense count for every category this month, including categories with no recorded spending.
-
-Both commands support the same periods:
-/stats week or /categories week — Monday through now.
-/stats month or /categories month — this month to date (the default).
-/stats lastmonth or /categories lastmonth — the previous full month.
-/stats 2026-09 or /categories 2026-09 — a specific month, using YYYY-MM. Future months are unavailable.
-Use the period buttons to switch reports. Tap a category with recorded spending to see its merchants and purchases; use Back to return.
-
-Categories: ${CATEGORIES.join('; ')}.
-Reports use Singapore time and saved expense dates. Each currency is shown separately, with no conversion. Unconfirmed entries are excluded; missing entries do not prove lower real spending. Categories use the labels saved with each expense.
-
-Connect the app
-/link — get an 8-digit code to enter in the TeleBudget app. It expires in 10 minutes.
-/unlink — revoke all connected app sessions; your expenses stay saved.
-
-/start — show this getting-started guide.
-/help — show these instructions again.
-/cancel — cancel the current pending confirmation or edit.`;
+/stats — totals and meals
+/categories — spending breakdown
+/recent — saved expenses
+/link — connect the app
+Tap below for more help.`;
+const HELP_TOPICS = {
+  entry: 'One expense per message. SGD by default.\n“6.50 at macs for breakfast”\nMention breakfast, lunch, dinner or snacks.\nUse Meal on a saved expense to change it.\nReceipt photos are processed, then discarded.',
+  edit: 'Use Edit or Undo on a saved expense.\nEdits need a complete replacement expense.\nInclude the original date to keep it.\nConfirm saves an uncertain entry.\n/cancel stops an edit or confirmation.',
+  reports: '/stats or /categories\nAdd week, lastmonth or YYYY-MM.\nExample: /stats 2026-09\nReports use Singapore time.\nCurrencies stay separate. Use Next for details.',
+  app: '/link gives a code valid for 10 minutes.\nEnter it in the TeleBudget app.\n/unlink disconnects all app sessions.\nYour saved expenses stay.'
+};
+const HELP_BUTTONS = { inline_keyboard: [
+  [{ text: 'Recording', callback_data: 'help:entry' }, { text: 'Edit / Undo', callback_data: 'help:edit' }],
+  [{ text: 'Reports', callback_data: 'help:reports' }, { text: 'App', callback_data: 'help:app' }]
+] };
 
 async function telegram(env, method, payload) {
   const response = await fetch(api(env, method), { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload), signal: AbortSignal.timeout(15000) });
   const data = await response.json();
+  if (['editMessageText', 'editMessageReplyMarkup'].includes(method) && data.description?.includes('message is not modified')) return null;
   if (!data.ok) throw new Error(`Telegram ${method}: ${response.status}`);
   return data.result;
 }
 
-async function sendAnalytics(env, chatId, userId, period, category = null, now = new Date(), view = 'stats') {
+async function sendAnalytics(env, chatId, userId, period, category = null, now = new Date(), view = 'stats', pageIndex = 0, messageId = null) {
   const categoryOverview = view === 'categories' && !category;
   const data = categoryOverview ? await loadCategories(env.DB, userId, period) : await loadStats(env.DB, userId, period, category);
-  const messages = categoryOverview ? formatCategories(data, period) : formatStats(data, period, category);
-  for (let index = 0; index < messages.length; index++) {
-    await telegram(env, 'sendMessage', { chat_id: chatId, text: messages[index],
-      ...(index === messages.length - 1 ? { reply_markup: statsKeyboard(period, data, category, now, view) } : {}) });
-  }
+  const pages = categoryOverview ? formatCategories(data, period) : formatStats(data, period, category);
+  const index = Math.min(pageIndex, pages.length - 1);
+  await telegram(env, messageId ? 'editMessageText' : 'sendMessage', {
+    chat_id: chatId, ...(messageId ? { message_id: messageId } : {}), text: pages[index],
+    reply_markup: statsKeyboard(period, data, category, now, view, index, pages.length)
+  });
 }
 
-function buttons(id) {
+async function sendRecent(env, chatId, userId, offset = 0, messageId = null) {
+  const { results } = await env.DB.prepare('SELECT * FROM transactions WHERE user_id=? ORDER BY transaction_date DESC,id DESC LIMIT 4 OFFSET ?').bind(userId, offset).all();
+  const rows = results.slice(0, 3);
+  const nav = [];
+  if (offset) nav.push({ text: 'Newer', callback_data: `recent:${Math.max(0, offset - 3)}` });
+  if (results.length > 3) nav.push({ text: 'Older', callback_data: `recent:${offset + 3}` });
+  await telegram(env, messageId ? 'editMessageText' : 'sendMessage', {
+    chat_id: chatId, ...(messageId ? { message_id: messageId } : {}),
+    text: rows.length ? 'Recent expenses\n' + rows.map(row => `#${row.id} ${summary(row)}`).join('\n') : 'No expenses yet. Try “6.50 at macs”.',
+    reply_markup: { inline_keyboard: nav.length ? [nav] : [] }
+  });
+}
+
+function buttons(id, entry) {
   return { inline_keyboard: [[
     { text: '✏️ Edit', callback_data: `edit:${id}` },
-    { text: '↩️ Undo', callback_data: `undo:${id}` }
+    { text: '↩️ Undo', callback_data: `undo:${id}` },
+    ...(entry?.category === 'Food & Dining' ? [{ text: 'Meal', callback_data: `meal:${id}` }] : [])
   ]] };
 }
 
 function summary(entry) {
-  return `${entry.currency} ${Number(entry.amount).toFixed(2)} · ${entry.merchant || entry.description}\n${entry.category}${entry.payment_method ? ` · ${entry.payment_method}` : ''}`;
+  return `${entry.currency} ${Number(entry.amount).toFixed(2)} · ${shortLabel(entry.merchant || entry.description, 32)}\n${entry.category === 'Food & Dining' ? (entry.meal_type || 'Other food') : entry.category}`;
 }
 
 async function getUser(env, from) {
@@ -97,18 +94,19 @@ async function clearPending(env, userId) {
 }
 
 async function saveEntry(env, userId, entry, sourceRef, pending = null) {
+  const meal = entry.category === 'Food & Dining' ? (MEALS.includes(entry.meal_type) ? entry.meal_type : 'Other food') : null;
   if (pending?.transaction_id) {
     await env.DB.prepare(`UPDATE transactions SET amount=?, currency=?, description=?, merchant=?, category=?,
-      transaction_date=?, payment_method=?, confidence_score=? WHERE id=? AND user_id=?`)
+      transaction_date=?, payment_method=?, confidence_score=?, meal_type=? WHERE id=? AND user_id=?`)
       .bind(entry.amount, entry.currency, entry.description, entry.merchant, entry.category,
-        entry.date, entry.payment_method, entry.confidence, pending.transaction_id, userId).run();
+        entry.date, entry.payment_method, entry.confidence, meal, pending.transaction_id, userId).run();
     return pending.transaction_id;
   }
   const result = await env.DB.prepare(`INSERT INTO transactions(user_id,amount,currency,description,merchant,category,
-    transaction_date,payment_method,source,source_reference,confidence_score)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,source_reference) DO NOTHING`)
+    transaction_date,payment_method,source,source_reference,confidence_score,meal_type)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id,source_reference) DO NOTHING`)
     .bind(userId, entry.amount, entry.currency, entry.description, entry.merchant, entry.category,
-      entry.date, entry.payment_method, 'telegram', sourceRef, entry.confidence).run();
+      entry.date, entry.payment_method, 'telegram', sourceRef, entry.confidence, meal).run();
   let id = result.meta.last_row_id;
   if (!result.meta.changes) {
     const existing = await env.DB.prepare('SELECT id FROM transactions WHERE user_id=? AND source_reference=?').bind(userId, sourceRef).first();
@@ -123,7 +121,7 @@ async function processText(env, message, user, updateId) {
   const command = text.split(/\s/)[0].toLowerCase().split('@')[0];
   if (command === '/start' || command === '/help') {
     await telegram(env, 'sendMessage', { chat_id: chatId,
-      text: HELP_TEXT });
+      text: HELP_TEXT, reply_markup: HELP_BUTTONS });
     return;
   }
   if (command === '/cancel') {
@@ -136,9 +134,7 @@ async function processText(env, message, user, updateId) {
     return;
   }
   if (command === '/recent') {
-    const { results } = await env.DB.prepare('SELECT * FROM transactions WHERE user_id=? ORDER BY transaction_date DESC,id DESC LIMIT 10').bind(user.id).all();
-    await telegram(env, 'sendMessage', { chat_id: chatId,
-      text: results.length ? results.map(row => `#${row.id} ${summary(row)}`).join('\n\n') : 'No expenses yet. Send “6.50 at macs” to start.' });
+    await sendRecent(env, chatId, user.id);
     return;
   }
   if (command === '/stats' || command === '/categories') {
@@ -190,7 +186,7 @@ async function processText(env, message, user, updateId) {
   }
   const id = await saveEntry(env, user.id, entry, `update:${updateId}`, pending);
   await clearPending(env, user.id);
-  await telegram(env, 'sendMessage', { chat_id: chatId, text: `Saved #${id}\n${summary(entry)}`, reply_markup: buttons(id) });
+  await telegram(env, 'sendMessage', { chat_id: chatId, text: `Saved #${id}\n${summary(entry)}`, reply_markup: buttons(id, entry) });
 }
 
 async function processPhoto(env, message, user, updateId) {
@@ -232,13 +228,40 @@ async function processPhoto(env, message, user, updateId) {
     return;
   }
   const id = await saveEntry(env, user.id, entry, `receipt-update:${updateId}`);
-  await telegram(env, 'sendMessage', { chat_id: chatId, text: `Saved receipt #${id}\n${summary(entry)}`, reply_markup: buttons(id) });
+  await telegram(env, 'sendMessage', { chat_id: chatId, text: `Saved receipt #${id}\n${summary(entry)}`, reply_markup: buttons(id, entry) });
 }
 
 async function processCallback(env, query, user) {
   const chatId = query.message.chat.id;
   const data = query.data || '';
   await telegram(env, 'answerCallbackQuery', { callback_query_id: query.id });
+  if (data === 'noop') return;
+  if (data.startsWith('help:')) {
+    const topic = data.slice(5);
+    const text = Object.hasOwn(HELP_TOPICS, topic) ? HELP_TOPICS[topic] : HELP_TEXT;
+    await telegram(env, 'editMessageText', { chat_id: chatId, message_id: query.message.message_id,
+      text, reply_markup: { inline_keyboard: [...HELP_BUTTONS.inline_keyboard, [{ text: 'Home', callback_data: 'help:home' }]] } });
+    return;
+  }
+  const recent = data.match(/^recent:(\d{1,6})$/);
+  if (recent) return sendRecent(env, chatId, user.id, Number(recent[1]), query.message.message_id);
+  const meal = data.match(/^meal:(\d+)(?::([0-4]))?$/);
+  if (meal) {
+    const id = Number(meal[1]);
+    const entry = await env.DB.prepare("SELECT * FROM transactions WHERE id=? AND user_id=? AND category='Food & Dining'").bind(id, user.id).first();
+    if (!entry) return;
+    if (meal[2] === undefined) {
+      const choices = MEALS.map((name, index) => ({ text: name, callback_data: `meal:${id}:${index}` }));
+      await telegram(env, 'editMessageReplyMarkup', { chat_id: chatId, message_id: query.message.message_id,
+        reply_markup: { inline_keyboard: [choices.slice(0, 3), choices.slice(3)] } });
+    } else {
+      entry.meal_type = MEALS[Number(meal[2])];
+      await env.DB.prepare('UPDATE transactions SET meal_type=? WHERE id=? AND user_id=?').bind(entry.meal_type, id, user.id).run();
+      await telegram(env, 'editMessageText', { chat_id: chatId, message_id: query.message.message_id,
+        text: `Saved #${id}\n${summary(entry)}`, reply_markup: buttons(id, entry) });
+    }
+    return;
+  }
   if (data.startsWith('stats:') || data.startsWith('categories:')) {
     const now = new Date();
     const selection = parseStatsCallback(data, now);
@@ -246,7 +269,7 @@ async function processCallback(env, query, user) {
       await telegram(env, 'sendMessage', { chat_id: chatId, text: data.startsWith('categories:') ? CATEGORIES_USAGE : STATS_USAGE });
       return;
     }
-    await sendAnalytics(env, chatId, user.id, selection.period, selection.category, now, selection.view);
+    await sendAnalytics(env, chatId, user.id, selection.period, selection.category, now, selection.view, selection.page, query.message.message_id);
     return;
   }
   if (data === 'cancel') {
@@ -261,7 +284,7 @@ async function processCallback(env, query, user) {
     if (!entry.amount) return;
     const id = await saveEntry(env, user.id, entry, `confirmed:${query.id}`, pending);
     await clearPending(env, user.id);
-    await telegram(env, 'sendMessage', { chat_id: chatId, text: `Saved #${id}\n${summary(entry)}`, reply_markup: buttons(id) });
+    await telegram(env, 'sendMessage', { chat_id: chatId, text: `Saved #${id}\n${summary(entry)}`, reply_markup: buttons(id, entry) });
     return;
   }
   const match = data.match(/^(edit|undo):(\d+)$/);

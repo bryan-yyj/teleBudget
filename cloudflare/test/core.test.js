@@ -1,6 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { normalizeEntry, parseModelJson, extractExpense, SYSTEM_PROMPT } from '../shared/core.js';
+import { mealFromText } from '../shared/meals.js';
+
+test('food meals follow explicit words and never the message time or guessed AI label', () => {
+  const raw = { amount: 10.5, category: 'Food & Dining', merchant: 'Subway', confidence: 0.9, meal_type: 'Breakfast' };
+  const normalize = text => normalizeEntry(raw, text, '2026-10-07T00:00:00Z', true);
+  for (const [text, expected] of [
+    ['10.50 at Subway for lunch', 'Lunch'], ['10.50 breakfast at Subway', 'Breakfast'],
+    ['10.50 dinner at Subway', 'Dinner'], ['10.50 brekkie', 'Breakfast'],
+    ['10.50 kopi', 'Snacks & Drinks'], ['10.50 coffee with lunch', 'Lunch'],
+    ['10.50 at Subway', 'Other food'], ['10.50 breakfast and lunch', 'Other food']
+  ]) assert.equal(normalize(text).meal_type, expected, text);
+  assert.equal(normalizeEntry({ ...raw, category: 'Transportation' }, '10.50 grab after lunch', undefined, true).meal_type, null);
+  assert.equal(mealFromText('10.50 at Dinnerware shop'), 'Other food');
+});
+
+test('receipt meal values are restricted and a caption overrides the model', () => {
+  const raw = { amount: 8, category: 'Food & Dining', merchant: 'Cafe', meal_type: 'Brunch' };
+  assert.equal(normalizeEntry(raw).meal_type, 'Other food');
+  assert.equal(normalizeEntry({ ...raw, meal_type: 'Breakfast' }, 'dinner receipt').meal_type, 'Dinner');
+});
 
 test('understands the intended shorthand through the AI prompt', async () => {
   assert.match(SYSTEM_PROMPT, /6\.50 at macs/);

@@ -5,7 +5,8 @@ import { readFileSync } from 'node:fs';
 import worker from '../worker/index.js';
 import { CATEGORIES } from '../shared/core.js';
 import { resolveStatsPeriod, parseStatsCallback, loadStats, formatStats, statsKeyboard,
-  loadCategories, formatCategories, splitStatsMessage, STATS_USAGE, CATEGORIES_USAGE } from '../shared/analytics.js';
+  loadCategories, formatCategories, STATS_USAGE, CATEGORIES_USAGE } from '../shared/analytics.js';
+import { MEALS } from '../shared/meals.js';
 
 const NOW = new Date('2026-10-05T04:00:00.000Z'); // Monday, noon SGT
 
@@ -15,7 +16,7 @@ class TestDatabase {
   constructor(t) {
     this.sqlite = new DatabaseSync(':memory:');
     t.after(() => this.sqlite.close());
-    for (const migration of ['0001_initial.sql', '0002_no_image_storage.sql']) {
+    for (const migration of ['0001_initial.sql', '0002_no_image_storage.sql', '0003_meal_types.sql']) {
       this.sqlite.exec(readFileSync(new URL(`../migrations/${migration}`, import.meta.url), 'utf8'));
     }
     this.sqlite.exec("INSERT INTO users(id,telegram_id) VALUES (1,'101'),(2,'202')");
@@ -138,21 +139,16 @@ test('real SQL totals all saved entries by user/currency, with accurate shares a
   const data = await loadStats(db, 1, period);
   const total = data.totals.find(row => row.period === 0 && row.currency === 'SGD');
   assert.deepEqual({ total: total.total, count: total.count, days: total.active_days }, { total: 14300, count: 6, days: 5 });
-  const messages = formatStats(data, period);
-  assert.equal(messages.length, 3);
-  const sgd = messages[0];
-  assert.match(sgd, /Recorded total: SGD 143\.00 · 6 expenses/);
-  assert.match(sgd, /Average expense: SGD 23\.83/);
-  assert.match(sgd, /Recorded spend\/calendar day: SGD 28\.60/);
-  assert.match(sgd, /Shopping: SGD 100\.00 · 69\.9% · 1 expense/);
-  assert.match(sgd, /Food & Dining: SGD 32\.00 · 22\.4% · 3 expenses/);
-  assert.match(sgd, /Recorded spending up SGD 93\.00 \(186\.0%\)/);
-  assert.match(sgd, /Largest category increase: Shopping \+SGD 100\.00/);
-  assert.match(sgd, /Largest category decrease: Food & Dining -SGD 8\.00/);
-  assert.match(messages.find(message => message.includes('\nUSD\n')), /Recorded total: USD 50\.00 · 1 expense/);
-  assert.match(messages.find(message => message.includes('\nEUR\n')), /Recorded total: EUR 0\.00 · 0 expenses/);
-  assert.match(messages.find(message => message.includes('\nEUR\n')), /down EUR 9\.00 \(100\.0%\)/);
-  assert.doesNotMatch(messages.join('\n'), /99,999|88,888|77,777|NaN|Infinity|savings/);
+  const pages = formatStats(data, period);
+  assert.match(pages[0], /SGD 143\.00 · 6 expenses/);
+  assert.match(pages[0], /Avg SGD 23\.83/);
+  assert.match(pages[0], /Per day SGD 28\.60/);
+  assert.match(pages[0], /Up SGD 93\.00 \(186\.0%\)/);
+  assert.match(pages.join('\n'), /Shopping: 100\.00 · 69\.9%/);
+  assert.match(pages.join('\n'), /Food & Dining: 32\.00 · 22\.4%/);
+  assert.match(pages.join('\n'), /USD 50\.00 · 1 expense/);
+  assert.match(pages.join('\n'), /Down EUR 9\.00 \(100\.0%\)/);
+  assert.doesNotMatch(pages.join('\n'), /99,999|88,888|77,777|NaN|Infinity|savings/);
 });
 
 test('unknown labels are combined and accounted for without inventing merchants/payments', async t => {
@@ -163,20 +159,20 @@ test('unknown labels are combined and accounted for without inventing merchants/
   assert.equal(merchants.find(row => row.unknown).total, 800);
   const payments = data.payments.filter(row => row.currency === 'SGD');
   assert.equal(payments.filter(row => row.unknown).length, 1);
-  const output = formatStats(data, resolveStatsPeriod('month', NOW))[0];
-  assert.match(output, /Merchant not recorded: SGD 8\.00 · 5\.6% · 2 expenses/);
-  assert.match(output, /Payment method not recorded: SGD 8\.00 · 5\.6% · 2 expenses/);
+  const output = formatStats(data, resolveStatsPeriod('month', NOW)).join('\n');
+  assert.match(output, /Not recorded: SGD 8\.00/);
+  assert.match(output, /Not recorded: SGD 8\.00/);
 });
 
 test('category drilldown filters purchases/groups but shares use the overall currency total', async t => {
   const db = fixture(t);
   const period = resolveStatsPeriod('month', NOW);
   const data = await loadStats(db, 1, period, 'Food & Dining');
-  const report = formatStats(data, period, 'Food & Dining')[0];
-  assert.match(report, /Recorded total: SGD 32\.00 · 3 expenses/);
-  assert.match(report, /Share of all SGD spending: 22\.4%/);
-  assert.match(report, /Average expense: SGD 10\.67/);
-  assert.match(report, /Recorded spending down SGD 8\.00 \(20\.0%\)/);
+  const report = formatStats(data, period, 'Food & Dining').join('\n');
+  assert.match(report, /SGD 32\.00 · 3 expenses/);
+  assert.match(report, /22\.4% of spending/);
+  assert.match(report, /Avg SGD 10\.67/);
+  assert.match(report, /Down SGD 8\.00 \(20\.0%\)/);
   assert.doesNotMatch(report, /Store|Shopping|Where the money went/);
   assert.equal(data.purchases.filter(row => row.currency === 'SGD').length, 3);
   assert.ok(data.purchases.every(row => row.category === 'Food & Dining'));
@@ -205,9 +201,9 @@ test('empty and one-expense periods have honest averages and missing-history mes
   insert(db, { amount: 0.1 });
   data = await loadStats(db, 1, period);
   const report = formatStats(data, period)[0];
-  assert.match(report, /Average expense: SGD 0\.10/);
-  assert.match(report, /Recorded spend\/calendar day: SGD 0\.02/);
-  assert.match(report, /not enough history for a percentage change/);
+  assert.match(report, /Avg SGD 0\.10/);
+  assert.match(report, /Per day SGD 0\.02/);
+  assert.match(report, /No prior recorded history/);
   assert.doesNotMatch(report, /Recorded spending (?:up|down)|NaN|Infinity/);
   insert(db, { amount: 0.2 });
   data = await loadStats(db, 1, period);
@@ -226,11 +222,11 @@ test('all categories appear while long merchant/payment lists have bounded resul
   assert.equal(data.purchases.length, 3);
   assert.equal(data.categories.length, CATEGORIES.length);
   const report = formatStats(data, period).join('\n');
-  for (const name of CATEGORIES) assert.ok(report.includes(`${name}: SGD`));
+  for (const name of CATEGORIES) assert.ok(report.includes(`${name}: `));
   assert.match(report, /Other merchants: SGD 95\.00/);
-  assert.match(report, /Other payment methods: SGD 97\.00/);
+  assert.match(report, /Other methods: SGD 97\.00/);
   const keyboard = statsKeyboard(period, data, null, NOW);
-  assert.equal(keyboard.inline_keyboard.flat().length, CATEGORIES.length + 3);
+  assert.equal(keyboard.inline_keyboard.flat().length, 5);
   assert.ok(keyboard.inline_keyboard.flat().every(button => Buffer.byteLength(button.callback_data) <= 64));
 });
 
@@ -241,21 +237,23 @@ test('query plan uses the existing user/date index', async t => {
   assert.ok(plan.some(row => row.detail.includes('idx_transactions_user_date')));
 });
 
-test('long Unicode/user-provided labels remain plain text and within Telegram limits', async t => {
+test('every report page stays short with Unicode and long user labels', async t => {
   const db = new TestDatabase(t);
-  for (let index = 0; index < 8; index++) insert(db, { amount: 1000000, merchant: `*<${index}>*\n` + '🧋'.repeat(120),
-    description: '🧋'.repeat(240), category: CATEGORIES[index], payment_method: `Card ${index}` + '🧋'.repeat(80) });
+  for (let index = 0; index < 8; index++) insert(db, { amount: 1000000, merchant: '*<' + index + '>\n' + '🧋'.repeat(120),
+    description: '🧋'.repeat(240), category: CATEGORIES[index], payment_method: '🧋'.repeat(80) });
   const period = resolveStatsPeriod('month', NOW);
-  const output = formatStats(await loadStats(db, 1, period), period);
-  assert.ok(output.every(message => message.length > 0 && message.length <= 3900));
-  assert.ok(output.join('\n').includes('*<'));
-  const long = '🧋'.repeat(5000);
-  const split = splitStatsMessage(long);
-  assert.ok(split.every(message => message.length <= 3900));
-  assert.equal(split.join(''), long);
+  const data = await loadStats(db, 1, period);
+  for (const pages of [formatStats(data, period), formatStats(data, period, 'Food & Dining'), formatCategories(data, period)]) {
+    for (const message of pages) {
+      assert.ok(message.length <= 500, message);
+      assert.ok(message.split('\n').length <= 8, message);
+      assert.ok(!/[\uD800-\uDBFF]$/.test(message));
+    }
+  }
+  assert.ok(formatStats(data, period).join('\n').includes('*<'));
 });
 
-async function dispatch(t, db, textOrCallback, userId = 101) {
+async function dispatch(t, db, textOrCallback, userId = 101, ai = null) {
   const sent = [];
   t.mock.method(globalThis, 'fetch', async (url, request) => {
     sent.push({ method: url.split('/').at(-1), ...JSON.parse(request.body) });
@@ -266,18 +264,20 @@ async function dispatch(t, db, textOrCallback, userId = 101) {
   const updateId = ++sourceId;
   const body = typeof textOrCallback === 'string'
     ? { update_id: updateId, message: { from, chat, text: textOrCallback, date: Math.floor(Date.now() / 1000) } }
-    : { update_id: updateId, callback_query: { id: `callback-${updateId}`, from, message: { chat }, ...textOrCallback } };
+    : { update_id: updateId, callback_query: { id: `callback-${updateId}`, from, message: { chat, message_id: 123 }, ...textOrCallback } };
   db.sqlite.prepare('INSERT INTO telegram_updates(update_id) VALUES (?)').run(updateId);
   let acked = false;
   let retried = false;
   await worker.queue({ messages: [{ body, ack: () => { acked = true; }, retry: () => { retried = true; } }] },
-    { DB: db, TELEGRAM_BOT_TOKEN: 'test-token', AI: { run: () => { throw new Error('Stats must not call AI'); } } });
+    { DB: db, TELEGRAM_BOT_TOKEN: 'test-token', AI: ai || { run: () => { throw new Error('Stats must not call AI'); } } });
   assert.equal(retried, false);
   assert.equal(acked, true);
   assert.equal(db.sqlite.prepare('SELECT status FROM telegram_updates WHERE update_id=?').get(updateId).status, 'processed');
   t.mock.restoreAll();
   return sent;
 }
+
+
 
 test('queued stats command and category callbacks work end to end without disturbing pending entries', async t => {
   const db = new TestDatabase(t);
@@ -286,15 +286,15 @@ test('queued stats command and category callbacks work end to end without distur
   db.sqlite.prepare('INSERT INTO pending_entries(user_id,payload) VALUES (?,?)').run(1, '{"amount":200}');
   const sent = await dispatch(t, db, `/stats@TeleBudgetBot ${period.key}`);
   assert.equal(sent.length, 1);
-  assert.match(sent[0].text, /Recorded total: SGD 13\.35 · 1 expense/);
+  assert.match(sent[0].text, /SGD 13\.35 · 1 expense/);
   assert.equal(sent[0].parse_mode, undefined);
   const button = sent[0].reply_markup.inline_keyboard.flat().find(row => row.text === 'Food & Dining');
   const detail = await dispatch(t, db, { data: button.callback_data });
   assert.equal(detail[0].method, 'answerCallbackQuery');
-  assert.match(detail[1].text, /Share of all SGD spending: 100\.0%/);
+  assert.match(detail[1].text, /Food total SGD 13\.35/);
   assert.equal(db.sqlite.prepare('SELECT payload FROM pending_entries WHERE user_id=1').get().payload, '{"amount":200}');
   const otherUser = await dispatch(t, db, { data: button.callback_data }, 202);
-  assert.match(otherUser[1].text, /No Food & Dining expenses recorded/);
+  assert.match(otherUser[1].text, /No expenses recorded/);
   assert.doesNotMatch(otherUser[1].text, /13\.35/);
 });
 
@@ -309,7 +309,7 @@ test('queued defaults, shortcuts, help and invalid selections route without AI',
     assert.equal((await dispatch(t, db, command))[0].text, STATS_USAGE);
   }
   assert.equal((await dispatch(t, db, { data: 'stats:2026-13:0' }))[1].text, STATS_USAGE);
-  assert.match((await dispatch(t, db, '/help'))[0].text, /Tap a category/);
+  assert.match((await dispatch(t, db, '/help'))[0].text, /Tap below/);
 });
 
 test('confirmation, edits and undo are reflected immediately; pending entries are excluded', async t => {
@@ -330,34 +330,29 @@ test('confirmation, edits and undo are reflected immediately; pending entries ar
   assert.match((await dispatch(t, db, `/stats ${period.key}`))[0].text, /SGD 20\.00 · 1 expense/);
 });
 
-test('category overview totals and shares match stats, with all categories and separate currencies', async t => {
+test('category pages preserve amounts and shares across currencies', async t => {
   const db = fixture(t);
   const period = resolveStatsPeriod('month', NOW);
   const data = await loadCategories(db, 1, period);
-  const reports = formatCategories(data, period);
-  assert.equal(reports.length, 2); // prior-only EUR is outside the selected period
-  assert.match(reports[0], /Recorded total: SGD 143\.00 · 6 expenses/);
-  assert.match(reports[0], /Shopping: SGD 100\.00 · 69\.9% · 1 expense/);
-  assert.match(reports[0], /Food & Dining: SGD 32\.00 · 22\.4% · 3 expenses/);
-  assert.match(reports[0], /Education: SGD 0\.00 · 0\.0% · 0 expenses/);
-  assert.match(reports[1], /Recorded total: USD 50\.00 · 1 expense/);
-  for (const report of reports) {
-    for (const category of CATEGORIES) assert.ok(report.includes(`${category}: `));
-    assert.ok(report.length <= 3900);
-  }
-  assert.doesNotMatch(reports.join('\n'), /EUR|99,999|88,888|NaN|Infinity/);
-  const sgd = data.categories.filter(row => row.currency === 'SGD');
-  assert.equal(sgd.reduce((sum, row) => sum + row.total, 0), 14300);
+  const pages = formatCategories(data, period);
+  assert.equal(pages.length, 4);
+  assert.match(pages[0], /Total SGD 143\.00/);
+  assert.match(pages[0], /Shopping: 100\.00 · 69\.9%/);
+  assert.match(pages[0], /Food & Dining: 32\.00 · 22\.4%/);
+  assert.match(pages[1], /Education: 0\.00 · 0\.0%/);
+  assert.match(pages[2], /Total USD 50\.00/);
+  for (const name of CATEGORIES) assert.ok(pages.join('\n').includes(name));
+  assert.doesNotMatch(pages.join('\n'), /EUR|99,999|88,888|NaN|Infinity/);
 });
 
-test('empty category periods list zero spending in all supported categories', async t => {
+test('empty category pages show zeros without excessive text', async t => {
   const db = new TestDatabase(t);
   const period = resolveStatsPeriod('month', NOW);
-  const report = formatCategories(await loadCategories(db, 1, period), period)[0];
-  assert.match(report, /No expenses recorded in this period/);
-  assert.match(report, /SGD · default currency/);
-  for (const category of CATEGORIES) assert.ok(report.includes(`${category}: SGD 0.00 · 0.0% · 0 expenses`));
-  assert.doesNotMatch(report, /NaN|Infinity/);
+  const pages = formatCategories(await loadCategories(db, 1, period), period);
+  assert.equal(pages.length, 2);
+  assert.match(pages[0], /no expenses/);
+  for (const name of CATEGORIES) assert.ok(pages.join('\n').includes(name + ': 0.00 · 0.0%'));
+  assert.ok(pages.every(page => page.length <= 500));
 });
 
 test('queued categories report, detail and Back retain the category view and user isolation', async t => {
@@ -367,17 +362,17 @@ test('queued categories report, detail and Back retain the category view and use
   db.sqlite.prepare('INSERT INTO pending_entries(user_id,payload) VALUES (?,?)').run(1, '{"amount":200}');
   const sent = await dispatch(t, db, `/categories@TeleBudgetBot ${period.key}`);
   assert.equal(sent.length, 1);
-  assert.match(sent[0].text, /Food & Dining: SGD 13\.35 · 100\.0% · 1 expense/);
+  assert.match(sent[0].text, /Food & Dining: 13\.35 · 100\.0%/);
   assert.doesNotMatch(sent[0].text, /Top merchants|Largest purchases/);
   const buttons = sent[0].reply_markup.inline_keyboard.flat();
-  assert.ok(buttons.every(button => button.callback_data.startsWith('categories:')));
+  assert.ok(buttons.every(button => button.callback_data === 'noop' || button.callback_data.startsWith('categories:')));
   assert.ok(buttons.every(button => Buffer.byteLength(button.callback_data) <= 64));
   const detail = await dispatch(t, db, { data: buttons.find(button => button.text === 'Food & Dining').callback_data });
   assert.equal(detail[0].method, 'answerCallbackQuery');
-  assert.match(detail[1].text, /Share of all SGD spending: 100\.0%/);
+  assert.match(detail[1].text, /Food total SGD 13\.35/);
   const back = detail[1].reply_markup.inline_keyboard.flat().find(button => button.text === 'Back to categories');
   assert.equal(back.callback_data, `categories:${period.key}`);
-  assert.match((await dispatch(t, db, { data: back.callback_data }))[1].text, /Category spending/);
+  assert.match((await dispatch(t, db, { data: back.callback_data }))[1].text, /Categories/);
   const otherUser = await dispatch(t, db, { data: back.callback_data }, 202);
   assert.doesNotMatch(otherUser[1].text, /13\.35/);
   assert.equal(db.sqlite.prepare('SELECT payload FROM pending_entries WHERE user_id=1').get().payload, '{"amount":200}');
@@ -387,11 +382,11 @@ test('categories shortcuts, period buttons and invalid arguments route without A
   const db = new TestDatabase(t);
   for (const command of ['/categories', '/categories month', '/categories week', '/categories lastmonth']) {
     const sent = await dispatch(t, db, command);
-    assert.match(sent[0].text, /Category spending/);
+    assert.match(sent[0].text, /Categories/);
     const periods = sent[0].reply_markup.inline_keyboard[0];
     assert.equal(periods.length, 3);
     for (const button of periods) {
-      assert.match((await dispatch(t, db, { data: button.callback_data }))[1].text, /Category spending/);
+      assert.match((await dispatch(t, db, { data: button.callback_data }))[1].text, /Categories/);
     }
   }
   for (const command of ['/categories all', '/categories 9999-12', '/categories month extra']) {
@@ -402,16 +397,119 @@ test('categories shortcuts, period buttons and invalid arguments route without A
   }
 });
 
-test('help and start explain every command and supported workflow within one Telegram message', async t => {
+test('help stays compact and topics replace the same message', async t => {
   const db = new TestDatabase(t);
-  const help = (await dispatch(t, db, '/help'))[0].text;
-  for (const command of ['/add', '/recent', '/stats', '/categories', '/link', '/unlink', '/start', '/help', '/cancel']) {
-    assert.ok(help.includes(command), command);
+  const help = (await dispatch(t, db, '/help'))[0];
+  assert.ok(help.text.length <= 300);
+  assert.ok(help.text.split('\n').length <= 8);
+  assert.equal((await dispatch(t, db, '/start'))[0].text, help.text);
+  const topics = [];
+  for (const button of help.reply_markup.inline_keyboard.flat()) {
+    const sent = await dispatch(t, db, { data: button.callback_data });
+    assert.equal(sent[1].method, 'editMessageText');
+    assert.equal(sent[1].message_id, 123);
+    assert.ok(sent[1].text.length <= 300);
+    topics.push(sent[1].text);
   }
-  for (const detail of ['6.50 at macs', 'Confirm', 'Edit', 'Undo', '30 minutes', '10 minutes',
-    'YYYY-MM', 'Monday through now', 'Singapore time', 'separately', 'original date']) {
-    assert.ok(help.includes(detail), detail);
+  assert.match(topics.join('\n'), /Confirm|Edit|Undo|breakfast|\/unlink|YYYY-MM/);
+});
+
+test('meal totals partition food spending and isolate user, currency, date and non-food', async t => {
+  const db = new TestDatabase(t);
+  const period = resolveStatsPeriod('month', NOW);
+  for (let i = 0; i < MEALS.length; i++) insert(db, { amount: i + 1, meal_type: MEALS[i] });
+  insert(db, { amount: 6, meal_type: null }); // legacy row
+  insert(db, { amount: 70, category: 'Shopping', meal_type: null });
+  insert(db, { amount: 90, meal_type: 'Lunch', currency: 'USD' });
+  insert(db, { amount: 9999, meal_type: 'Lunch', user_id: 2 });
+  insert(db, { amount: 8888, meal_type: 'Lunch', transaction_date: period.current.end });
+  const data = await loadStats(db, 1, period);
+  const meals = data.meals.filter(row => row.currency === 'SGD');
+  assert.equal(meals.reduce((sum, row) => sum + row.total, 0), 2100);
+  assert.equal(meals.find(row => row.label === 'Other food').total, 1100);
+  const pages = formatStats(data, period, 'Food & Dining');
+  assert.match(pages[0], /Breakfast: SGD 1\.00/);
+  assert.match(pages[0], /Lunch: SGD 2\.00/);
+  assert.match(pages[0], /Dinner: SGD 3\.00/);
+  assert.match(pages[0], /Food total SGD 21\.00/);
+  assert.doesNotMatch(pages[0], /90\.00|9999|8888|70\.00/);
+});
+
+test('ordinary text saves a meal without start; corrections and undo update analytics', async t => {
+  const db = new TestDatabase(t);
+  const ai = { run: async () => ({ response: JSON.stringify({ amount: 10.5, category: 'Food & Dining',
+    merchant: 'Subway', description: 'Lunch', confidence: 0.95 }) }) };
+  const saved = await dispatch(t, db, '10.50 at subway for lunch', 101, ai);
+  assert.equal(saved.length, 1);
+  assert.match(saved[0].text, /Saved #\d+\nSGD 10\.50 · Subway\nLunch/);
+  const row = db.sqlite.prepare('SELECT * FROM transactions').get();
+  assert.equal(row.meal_type, 'Lunch');
+  const picker = await dispatch(t, db, { data: `meal:${row.id}` });
+  assert.equal(picker[1].method, 'editMessageReplyMarkup');
+  assert.equal(picker[1].reply_markup.inline_keyboard.flat().length, MEALS.length);
+  const corrected = await dispatch(t, db, { data: `meal:${row.id}:2` });
+  assert.equal(corrected[1].method, 'editMessageText');
+  assert.match(corrected[1].text, /Dinner/);
+  await dispatch(t, db, { data: `meal:${row.id}:0` }, 202);
+  assert.equal(db.sqlite.prepare('SELECT meal_type FROM transactions').get().meal_type, 'Dinner');
+  const period = resolveStatsPeriod('month');
+  assert.equal((await loadStats(db, 1, period)).meals.find(row => row.label === 'Dinner').total, 1050);
+  await dispatch(t, db, { data: `undo:${row.id}` });
+  assert.deepEqual((await loadStats(db, 1, period)).meals, []);
+});
+
+test('meal labels survive confirmation and edits; moving out of food clears the meal', async t => {
+  const db = new TestDatabase(t);
+  const ai = { run: async () => ({ response: JSON.stringify({ amount: 5, category: 'Food & Dining', merchant: 'Cafe', confidence: 0.5 }) }) };
+  await dispatch(t, db, '5 breakfast at cafe', 101, ai);
+  assert.equal(db.sqlite.prepare('SELECT COUNT(*) AS n FROM transactions').get().n, 0);
+  await dispatch(t, db, { data: 'confirm' });
+  const row = db.sqlite.prepare('SELECT * FROM transactions').get();
+  assert.equal(row.meal_type, 'Breakfast');
+  await dispatch(t, db, { data: `edit:${row.id}` });
+  await dispatch(t, db, '5 dinner at cafe', 101, ai);
+  await dispatch(t, db, { data: 'confirm' });
+  assert.equal(db.sqlite.prepare('SELECT meal_type FROM transactions').get().meal_type, 'Dinner');
+  await dispatch(t, db, { data: `edit:${row.id}` });
+  await dispatch(t, db, '5 at MRT', 101, { run: async () => ({ response: JSON.stringify({ amount: 5, category: 'Transportation', merchant: 'MRT', confidence: 0.9, meal_type: 'Dinner' }) }) });
+  assert.equal(db.sqlite.prepare('SELECT meal_type FROM transactions').get().meal_type, null);
+});
+
+test('report pagination edits exactly one message and exposes every category and currency', async t => {
+  const db = new TestDatabase(t);
+  const period = resolveStatsPeriod('lastmonth');
+  insert(db, { meal_type: 'Lunch', transaction_date: period.current.start });
+  insert(db, { currency: 'USD', meal_type: 'Dinner', transaction_date: period.current.start });
+  let sent = await dispatch(t, db, `/categories ${period.key}`);
+  const pages = [];
+  for (let n = 0; n < 4; n++) {
+    const message = sent.at(-1);
+    pages.push(message.text);
+    assert.ok(message.text.length <= 500);
+    assert.ok(message.text.split('\n').length <= 8);
+    assert.ok(message.reply_markup.inline_keyboard.length <= 4);
+    for (const button of message.reply_markup.inline_keyboard.flat()) assert.ok(Buffer.byteLength(button.callback_data) <= 64);
+    const next = message.reply_markup.inline_keyboard.flat().find(button => button.text === 'Next ›');
+    if (!next) break;
+    sent = await dispatch(t, db, { data: next.callback_data });
+    assert.equal(sent.length, 2); // acknowledgement + single edit
+    assert.equal(sent[1].method, 'editMessageText');
+    assert.equal(sent[1].message_id, 123);
   }
-  assert.ok(help.length <= 4096, `Help length: ${help.length}`);
-  assert.equal((await dispatch(t, db, '/start'))[0].text, help);
+  assert.equal(pages.length, 4);
+  for (const name of CATEGORIES) assert.ok(pages.join('\n').includes(name));
+  assert.match(pages.join('\n'), /USD/);
+  const oldCallback = await dispatch(t, db, { data: `stats:${period.key}:0` });
+  assert.match(oldCallback[1].text, /Food breakdown/);
+});
+
+test('recent expenses are limited to three entries and can page in place', async t => {
+  const db = new TestDatabase(t);
+  for (let i = 0; i < 5; i++) insert(db, { merchant: '🧋'.repeat(120) });
+  const first = await dispatch(t, db, '/recent');
+  assert.ok(first[0].text.split('\n').length <= 7);
+  const next = first[0].reply_markup.inline_keyboard.flat().find(button => button.text === 'Older');
+  const second = await dispatch(t, db, { data: next.callback_data });
+  assert.equal(second[1].method, 'editMessageText');
+  assert.equal(second[1].text.match(/#\d+/g).length, 2);
 });

@@ -1,5 +1,20 @@
 # Telegram spending analytics
 
+## Compact chat update
+
+Reports now open one page at a time (up to eight text lines / 500 characters),
+with Next/Back editing the same message. Help is split into button-selected topics;
+recent expenses show three entries per page. Category overviews show four categories
+per page. The older detailed report layout described below has been replaced.
+
+Food reports add Breakfast, Lunch, Dinner, Snacks & Drinks and Other food totals.
+Explicit meal words identify the group; unknown meals and legacy rows are Other food.
+Use the Meal button on a newly saved food expense to correct it. Receipt captions
+can supply the meal. Message time never supplies a guessed meal type. Meal totals
+use integer hundredths and the same user, currency and SGT period filters as stats.
+
+Apply additive migration `0003_meal_types.sql` before deploying this update.
+
 ## Scope and architecture
 
 The live path is Telegram -> Pages `/api/telegram` -> Queue -> `worker/index.js` -> D1.
